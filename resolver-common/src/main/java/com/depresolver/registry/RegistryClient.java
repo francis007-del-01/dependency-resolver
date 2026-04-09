@@ -27,6 +27,10 @@ public class RegistryClient {
     private final GitHubClient gitHubClient;
     private final ObjectMapper yamlMapper;
 
+    public RegistryClient(String githubToken) {
+        this(new GitHubClient(githubToken));
+    }
+
     public RegistryClient(GitHubClient gitHubClient) {
         this.gitHubClient = gitHubClient;
         this.yamlMapper = new ObjectMapper(new YAMLFactory()

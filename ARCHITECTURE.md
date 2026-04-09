@@ -4,8 +4,8 @@
 
 The Dependency Resolver automatically keeps Maven dependency versions up to date across repositories. It works in two stages:
 
-1. **Registration** - A Maven plugin runs during `mvn deploy` on each library. It pushes the pom.xml to the registry (for any target branch) and updates the version config (from the trigger branch only).
-2. **Resolution** - A Jenkins cron job runs every 10 minutes, reads the registry, diffs versions per branch, and creates PRs for outdated dependencies.
+1. **Registration** - A Maven plugin runs during `mvn deploy` on each library. It pushes the pom.xml to the registry (for any target branch) and updates the version config (from the trigger branch only). Both are optional per library.
+2. **Resolution** - A Jenkins cron job runs every 10 minutes, discovers all pom folders in the registry, diffs versions using semantic comparison, and creates PRs for outdated dependencies.
 
 No webhooks, no Nexus, no manually maintained repo lists. Libraries self-register.
 
@@ -20,18 +20,18 @@ The registry (versions.yaml + pom copies) lives in the `registry/` folder **insi
                         =================================
 
   +-------------------+       +---------------------------+
-  | Library Build     |       | version-register-maven-   |
-  | (mvn deploy)      |------>| plugin (RegisterVersionMojo)|
+  | Library Build     |       | resolver-plugin            |
+  | (mvn deploy)      |------>| (RegisterVersionMojo)      |
   +-------------------+       +---------------------------+
                                         |
-                                        | 1. Detect current branch
-                                        | 2. Parse targetBranches list
+                                        | currentBranch from CI
                                         |
                                         v
                         +-------------------------------+
                         | Is current branch in          |
                         | targetBranches OR             |
                         | triggerBranch?                 |
+                        | (both optional per library)    |
                         +-------------------------------+
                            |                    |
                           NO                   YES
@@ -39,7 +39,6 @@ The registry (versions.yaml + pom copies) lives in the `registry/` folder **insi
                         [SKIP]                  v
                               +--------------------------------+
                               | Is it a target branch?         |
-                              | (develop, master, etc.)        |
                               +--------------------------------+
                                         |
                                        YES
@@ -54,7 +53,6 @@ The registry (versions.yaml + pom copies) lives in the `registry/` folder **insi
                                         v
                               +--------------------------------+
                               | Is it also the trigger branch? |
-                              | (master by default)            |
                               +--------------------------------+
                                    |              |
                                   NO             YES
@@ -63,7 +61,7 @@ The registry (versions.yaml + pom copies) lives in the `registry/` folder **insi
                               +--------------------------------+
                               | Update versions.yaml           |
                               | (upsert latestVersion,         |
-                              |  repo coords, targetBranches)  |
+                              |  repo coords)                  |
                               | Retry on 409 conflict          |
                               +--------------------------------+
                                         |
@@ -94,20 +92,22 @@ The registry (versions.yaml + pom copies) lives in the `registry/` folder **insi
                                         v
                               +--------------------+
                               | 1. Read versions.yaml|
-                              |    from registry    |
+                              |    (latest versions)|
                               +--------------------+
                                         |
                                         v
                               +--------------------+
-                              | 2. Build lookup map|
-                              |    groupId:artifactId |
-                              |    -> latestVersion   |
+                              | 2. List all pom     |
+                              |    folders in       |
+                              |    registry/poms/   |
+                              |    (discover        |
+                              |     consumers)      |
                               +--------------------+
                                         |
                                         v
                         +-------------------------------+
-                        | 3. FOR EACH artifact:         |
-                        |    FOR EACH targetBranch:     |
+                        | 3. FOR EACH consumer:         |
+                        |    FOR EACH branch found:     |
                         +-------------------------------+
                                         |
                                         v
@@ -128,8 +128,8 @@ The registry (versions.yaml + pom copies) lives in the `registry/` folder **insi
                                         v
                         +-------------------------------+
                         | FOR EACH dependency in pom:   |
-                        |   Is it in the registry?      |
-                        |   Is its version outdated?    |
+                        |   Is it in versions.yaml?     |
+                        |   Is version older? (semver)  |
                         +-------------------------------+
                                    |          |
                                   NO         YES
@@ -177,6 +177,8 @@ The registry (versions.yaml + pom copies) lives in the `registry/` folder **insi
 
 ### 1. Maven Plugin (`RegisterVersionMojo`)
 
+**Module:** `resolver-plugin`
+
 **When it runs:** During `mvn deploy` phase.
 
 **What it does:**
@@ -184,23 +186,19 @@ The registry (versions.yaml + pom copies) lives in the `registry/` folder **insi
 ```
 execute()
   |
-  +-- Detect current branch:
-  |     1. Check env vars: GIT_BRANCH, BRANCH_NAME, GITHUB_REF_NAME, CI_COMMIT_BRANCH
-  |     2. Strip "origin/" prefix (Jenkins)
-  |     3. Fallback: git rev-parse --abbrev-ref HEAD
-  |     4. If undetectable: allow (conservative)
+  +-- Receive currentBranch from CI (explicit param)
   |
-  +-- Parse targetBranches (comma-separated -> list)
+  +-- Parse targetBranches (comma-separated -> list, optional)
   |
   +-- Is current branch a target branch OR the trigger branch?
   |     NO  --> skip entirely
   |     YES --> continue
   |
-  +-- If target branch: push pom.xml
+  +-- If target branch: push pom.xml via GitHub API
   |     Path: registry/poms/{groupId}/{artifactId}/{branch}/pom.xml
   |
-  +-- If trigger branch: update versions.yaml
-        - Upsert entry with latestVersion, repo coords, targetBranches
+  +-- If trigger branch: update versions.yaml via GitHub API
+        - Upsert entry with latestVersion, repo coords
         - Retry on 409 conflict (up to 3 times, exponential backoff)
 ```
 
@@ -209,7 +207,7 @@ execute()
 ```xml
 <plugin>
   <groupId>com.depresolver</groupId>
-  <artifactId>version-register-maven-plugin</artifactId>
+  <artifactId>resolver-plugin</artifactId>
   <version>1.0.0</version>
   <executions>
     <execution>
@@ -220,6 +218,8 @@ execute()
   <configuration>
     <repoOwner>myorg</repoOwner>
     <repoName>my-lib</repoName>
+    <currentBranch>${env.BRANCH_NAME}</currentBranch>
+    <triggerBranch>master</triggerBranch>
     <targetBranches>master,develop</targetBranches>
     <githubToken>${env.GITHUB_TOKEN}</githubToken>
   </configuration>
@@ -230,11 +230,11 @@ execute()
 |-----------|---------|-------------|
 | `repoOwner` | (required) | GitHub owner of your library's repo |
 | `repoName` | (required) | GitHub repo name |
+| `currentBranch` | (required) | Current branch from CI |
 | `githubToken` | (required) | GitHub personal access token |
-| `targetBranches` | `master` | Comma-separated branches to receive update PRs |
-| `triggerBranch` | `master` | Branch whose deploy updates versions.yaml |
+| `targetBranches` | (optional) | Comma-separated branches to push poms for |
+| `triggerBranch` | (optional) | Branch whose deploy updates versions.yaml |
 | `pomPath` | `pom.xml` | Path to pom.xml in your repo |
-| `registryBranch` | `main` | Branch of the registry repo (this repo) |
 
 The registry location (`myorg/dependency-resolver-cli`) is hardcoded in `RegistryClient`.
 
@@ -244,7 +244,7 @@ The registry location (`myorg/dependency-resolver-cli`) is hardcoded in `Registr
 
 The registry lives in the `registry/` folder of **this repo**.
 
-**registry/versions.yaml:**
+**registry/versions.yaml** (only trigger artifacts):
 
 ```yaml
 artifacts:
@@ -253,14 +253,11 @@ artifacts:
     latestVersion: 2.1.0
     repoOwner: myorg
     repoName: my-lib
-    targetBranches:
-      - master
-      - develop
     pomPath: pom.xml
     updatedAt: "2026-04-08T10:30:00Z"
 ```
 
-**POMs stored per branch:**
+**POMs stored per branch** (all target artifacts):
 
 ```
 registry/poms/
@@ -272,46 +269,41 @@ registry/poms/
       master/pom.xml
 ```
 
+Key distinction:
+- `versions.yaml` contains artifacts that **publish** versions (trigger branch deployed)
+- `poms/` contains artifacts that **receive** updates (target branch deployed)
+- An artifact can be in both, one, or neither
+
 ---
 
 ### 3. Cron Resolver (`CronResolverMain`)
+
+**Module:** `resolver-core`
 
 **When it runs:** Jenkins cron, every 10 minutes.
 
 **Algorithm:**
 
 ```
-1. READ versions.yaml from registry
-     -> All registered artifacts with latest versions + target branches
+1. READ versions.yaml
+     -> Build latestVersions map: groupId:artifactId -> version
+     -> Build metadata map: groupId:artifactId -> ArtifactEntry (repoOwner, repoName, pomPath)
 
-2. BUILD lookup map:
-     "com.myorg:my-lib"     -> "2.1.0"
-     "com.myorg:core-utils" -> "1.5.3"
+2. LIST all pom folders in registry/poms/ (discover consumers)
+     -> List groupId dirs, then artifactId dirs under each
 
-3. FOR EACH artifact in registry:
-     FOR EACH branch in artifact.targetBranches:
-       a. READ pom from registry/poms/{groupId}/{artifactId}/{branch}/pom.xml
-       b. PARSE with PomParser -> extract dependencies + properties
-       c. FOR EACH dependency (direct + managed):
-            - Is groupId:artifactId in our lookup map?
-            - Is the version in pom != latestVersion?
-            - If YES: apply PomModifier to update version
-       d. IF any bumps collected:
-            - Create PR targeting that branch
-            - Branch name: deps/{targetBranch}/bump-{name}-to-{ver}
-            - Idempotency: skip if branch or PR already exists
+3. FOR EACH consumer (pom folder):
+     a. Look up metadata from versions.yaml (need repoOwner/repoName for PR)
+     b. LIST branch dirs under this artifact
+     c. FOR EACH branch:
+        - READ pom from registry
+        - PARSE with PomParser
+        - FOR EACH dependency: check if older than latestVersion (semver)
+        - Apply PomModifier for each outdated dep
+        - Create PR with all bumps batched
 ```
 
-**Example scenario:**
-
-```
-Registry:
-  com.pool:pool -> latestVersion: 2.0.0
-
-service-b (targetBranches: [master, develop]):
-  master/pom.xml has pool 1.5.0    --> PR to bump to 2.0.0 on master
-  develop/pom.xml has pool 1.8.0   --> PR to bump to 2.0.0 on develop
-```
+**Version comparison:** Uses `VersionComparator.isOlderThan()` — proper semantic versioning. No downgrades (2.0.0 -> 1.5.0 is skipped). SNAPSHOT is older than release (1.0.0-SNAPSHOT < 1.0.0).
 
 ---
 
@@ -364,8 +356,10 @@ The cron resolver is safe to run repeatedly:
 | Scenario | What happens |
 |----------|-------------|
 | PR already created for this version bump | Branch exists check -> skip |
-| Dependency already up to date | Version equality check -> skip |
+| Dependency already up to date | Semver comparison -> skip |
+| Dependency is newer than registry | Semver comparison -> skip (no downgrade) |
 | Pom not yet in registry for a branch | readPom fails -> skip with warning |
+| No metadata in versions.yaml | Skip PR (can't determine target repo) |
 | Registry empty | No artifacts to process -> exit 0 |
 
 ---
@@ -374,38 +368,33 @@ The cron resolver is safe to run repeatedly:
 
 ```
 dependency-resolver/
-+-- pom.xml                                (parent POM, modules)
++-- pom.xml                                (parent POM, 3 modules)
 |
-+-- resolver-core/                         (fat JAR for Jenkins)
-|   +-- pom.xml
-|   +-- src/main/java/com/depresolver/
-|       +-- CronResolverMain.java          (CLI entry point)
-|       +-- github/
-|       |   +-- GitHubClient.java          (REST API client)
-|       |   +-- GitHubConflictException.java
-|       |   +-- PullRequestCreator.java    (PR orchestration)
-|       +-- pom/
-|       |   +-- PomParser.java             (DOM-based XML parsing)
-|       |   +-- PomModifier.java           (regex-based XML editing)
-|       |   +-- PropertyResolver.java      (${property} resolution)
-|       +-- registry/
-|       |   +-- ArtifactEntry.java         (registry entry model)
-|       |   +-- VersionRegistry.java       (registry root model)
-|       |   +-- RegistryClient.java        (read/write/upsert)
-|       +-- scanner/
-|           +-- DependencyMatch.java       (version match DTO)
++-- resolver-common/                       (shared classes)
+|   +-- github/GitHubClient.java           (GitHub REST API)
+|   +-- github/GitHubConflictException.java
+|   +-- registry/RegistryClient.java       (registry read/write/discover)
+|   +-- registry/ArtifactEntry.java        (registry data model)
+|   +-- registry/VersionRegistry.java      (registry root model)
+|   +-- registry/VersionComparator.java    (semantic version comparison)
 |
-+-- version-register-maven-plugin/         (Maven plugin for libraries)
-|   +-- pom.xml
-|   +-- src/main/java/com/depresolver/plugin/
-|       +-- RegisterVersionMojo.java       (deploy-phase Mojo)
++-- resolver-core/                         (fat JAR for Jenkins cron)
+|   +-- CronResolverMain.java             (CLI entry point)
+|   +-- github/PullRequestCreator.java    (PR creation + idempotency)
+|   +-- pom/PomParser.java               (DOM-based XML parsing)
+|   +-- pom/PomModifier.java             (regex-based XML editing)
+|   +-- pom/PropertyResolver.java        (${property} resolution)
+|   +-- scanner/DependencyMatch.java     (version match DTO)
+|
++-- resolver-plugin/                       (Maven plugin for libraries)
+|   +-- plugin/RegisterVersionMojo.java   (deploy-phase Mojo)
 |
 +-- registry/                              (version registry data)
-|   +-- versions.yaml                      (artifact index)
-|   +-- poms/                              (library pom.xml copies, per branch)
+|   +-- versions.yaml                     (trigger artifact index)
+|   +-- poms/                             (library pom.xml copies, per branch)
 |
 +-- jenkins-shared-lib/
-    +-- Jenkinsfile                         (cron trigger)
+    +-- Jenkinsfile                        (cron trigger)
 ```
 
 ---
@@ -419,7 +408,6 @@ java -jar resolver-core.jar \
 
 # Options:
 #   -t, --github-token     GitHub PAT (required)
-#   --registry-branch      Registry branch (default: main)
 #   --branch-prefix        PR branch prefix (default: deps)
 #   --dry-run              Log only, don't create PRs
 ```
@@ -441,8 +429,10 @@ mvn deploy on feature-branch:
   --> Skip entirely (not a target or trigger branch)
 
 Cron resolver:
-  --> For each artifact, for each targetBranch:
-      Read pom for that branch, diff against latest versions, create PR
+  --> Read versions.yaml for latest versions
+  --> List all pom folders in registry (discover consumers + branches)
+  --> For each consumer, for each branch:
+      Read pom, compare versions (semver, no downgrades), create PR
       PR branch: deps/{targetBranch}/bump-{name}-to-{version}
 ```
 
@@ -456,8 +446,9 @@ Cron resolver:
 | Format preservation | Regex-based pom editing, never DOM serialization |
 | Optimistic locking | GitHub SHA-based concurrency control with retry |
 | Idempotent PRs | Branch + PR existence checks before creation |
+| No downgrades | Semantic version comparison (VersionComparator) |
 | Branch-aware registration | Only trigger branch updates versions.yaml |
-| Multi-branch pom tracking | Each target branch has its own pom in registry |
+| Consumer discovery | Cron iterates pom folders, not versions.yaml entries |
 | Rate limit awareness | GitHubClient monitors X-RateLimit-Remaining |
 | Error resilience | Per-artifact failures don't stop processing others |
 | Dry run mode | Full flow without API mutations |

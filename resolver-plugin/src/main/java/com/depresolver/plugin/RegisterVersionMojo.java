@@ -1,6 +1,5 @@
 package com.depresolver.plugin;
 
-import com.depresolver.github.GitHubClient;
 import com.depresolver.registry.ArtifactEntry;
 import com.depresolver.registry.RegistryClient;
 import org.apache.maven.plugin.AbstractMojo;
@@ -63,7 +62,7 @@ public class RegisterVersionMojo extends AbstractMojo {
         }
 
         try {
-            RegistryClient registryClient = new RegistryClient(new GitHubClient(githubToken));
+            RegistryClient registryClient = new RegistryClient(githubToken);
 
             Path pomFile = project.getFile().toPath();
             String pomContent = Files.readString(pomFile);

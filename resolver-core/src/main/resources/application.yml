@@ -1,0 +1,9 @@
+github:
+  token: ${GITHUB_TOKEN}
+
+resolver:
+  branch-prefix: deps
+
+logging:
+  level:
+    com.depresolver: DEBUG

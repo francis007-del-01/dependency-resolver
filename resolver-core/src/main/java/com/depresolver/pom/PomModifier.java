@@ -36,7 +36,7 @@ public class PomModifier {
         };
     }
 
-    private String updatePropertyVersion(String pomContent, String propertyKey, String oldVersion, String newVersion) {
+    private String  updatePropertyVersion(String pomContent, String propertyKey, String oldVersion, String newVersion) {
         // Match <propertyKey>oldVersion</propertyKey> inside <properties> block
         String escapedKey = Pattern.quote(propertyKey);
         String escapedOld = Pattern.quote(oldVersion);
