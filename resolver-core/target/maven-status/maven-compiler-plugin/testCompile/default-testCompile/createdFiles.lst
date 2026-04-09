@@ -1,0 +1,4 @@
+com/depresolver/CronResolverMainTest.class
+com/depresolver/registry/RegistryClientTest.class
+com/depresolver/pom/PomParserTest.class
+com/depresolver/pom/PomModifierTest.class

@@ -1,0 +1,32 @@
+pipeline {
+    agent any
+
+    triggers {
+        cron('H/10 * * * *')
+    }
+
+    options {
+        timeout(time: 15, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    stages {
+        stage('Run Dependency Resolver') {
+            steps {
+                withCredentials([string(credentialsId: 'github-api-token', variable: 'GH_TOKEN')]) {
+                    sh """java -jar resolver-core.jar \
+                        --github-token "\${GH_TOKEN}" """
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            echo "Dependency resolver cron job failed. Check logs for details."
+        }
+        success {
+            echo "Dependency resolver completed successfully."
+        }
+    }
+}
