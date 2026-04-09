@@ -13,8 +13,9 @@
     <description>Automatically creates PRs to update Maven dependency versions across repos</description>
 
     <modules>
+        <module>resolver-common</module>
         <module>resolver-core</module>
-        <module>version-register-maven-plugin</module>
+        <module>resolver-plugin</module>
     </modules>
 
     <properties>

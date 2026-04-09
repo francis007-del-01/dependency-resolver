@@ -129,6 +129,6 @@ class CronResolverMainTest {
         assertEquals("2.0.0", pool.getLatestVersion());
         assertEquals("myorg", pool.getRepoOwner());
         assertEquals("pool", pool.getRepoName());
-        assertEquals(java.util.List.of("master"), pool.getTargetBranches());
+        assertEquals("pom.xml", pool.getPomPath());
     }
 }

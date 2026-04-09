@@ -21,10 +21,6 @@ public class PullRequestCreator {
 
     public record BumpedDependency(String groupId, String artifactId, String oldVersion, String newVersion) {}
 
-    /**
-     * Creates a PR to update the pom.xml in the target repo with batched dependency bumps.
-     * Returns the PR result, or null if skipped.
-     */
     public GitHubClient.PrResult createUpdatePr(ArtifactEntry target, String targetBranch,
                                                   String updatedPomContent,
                                                   List<BumpedDependency> bumps, boolean dryRun) throws Exception {
@@ -48,10 +44,10 @@ public class PullRequestCreator {
             return null;
         }
 
-        // Get default branch HEAD SHA
+        // Get target branch HEAD SHA
         String headSha = gitHubClient.getBranchSha(owner, repo, targetBranch);
 
-        // Fetch current pom.xml to get its SHA for the commit
+        // Fetch current pom.xml from the library repo to get its SHA for the commit
         GitHubClient.FileContent pomFile = gitHubClient.getFileContent(owner, repo, pomPath, targetBranch);
 
         if (updatedPomContent.equals(pomFile.content())) {
