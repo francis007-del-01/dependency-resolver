@@ -10,7 +10,9 @@ public class DependencyMatch {
     public enum VersionType {
         DIRECT,
         PROPERTY,
-        MANAGED
+        MANAGED,
+        PARENT,
+        PLUGIN
     }
 
     private String groupId;

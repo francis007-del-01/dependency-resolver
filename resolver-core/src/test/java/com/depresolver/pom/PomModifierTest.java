@@ -130,6 +130,119 @@ class PomModifierTest {
         assertEquals(expected, result);
     }
 
+    @Test
+    void updateParentVersion() {
+        String xml = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <project>
+                    <modelVersion>4.0.0</modelVersion>
+                    <parent>
+                        <groupId>com.pool</groupId>
+                        <artifactId>pool-parent</artifactId>
+                        <version>1.0.0</version>
+                    </parent>
+                    <artifactId>child</artifactId>
+                    <dependencies>
+                        <dependency>
+                            <groupId>org.slf4j</groupId>
+                            <artifactId>slf4j-api</artifactId>
+                            <version>2.0.11</version>
+                        </dependency>
+                    </dependencies>
+                </project>
+                """;
+
+        DependencyMatch match = DependencyMatch.builder()
+                .groupId("com.pool")
+                .artifactId("pool-parent")
+                .currentVersion("1.0.0")
+                .versionType(VersionType.PARENT)
+                .repoOwner("myorg")
+                .repoName("child")
+                .pomPath("pom.xml")
+                .build();
+
+        String result = modifier.updateVersion(xml, match, "2.0.0");
+
+        assertNotEquals(xml, result);
+        assertTrue(result.contains("<version>2.0.0</version>"));
+        assertTrue(result.contains("<version>2.0.11</version>"));
+    }
+
+    @Test
+    void updatePluginVersion() {
+        String xml = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <project>
+                    <modelVersion>4.0.0</modelVersion>
+                    <groupId>com.example</groupId>
+                    <artifactId>with-plugin</artifactId>
+                    <version>1.0.0</version>
+                    <build>
+                        <plugins>
+                            <plugin>
+                                <groupId>com.internal</groupId>
+                                <artifactId>our-plugin</artifactId>
+                                <version>1.0.0</version>
+                            </plugin>
+                            <plugin>
+                                <groupId>org.apache.maven.plugins</groupId>
+                                <artifactId>maven-compiler-plugin</artifactId>
+                                <version>3.12.1</version>
+                            </plugin>
+                        </plugins>
+                    </build>
+                </project>
+                """;
+
+        DependencyMatch match = DependencyMatch.builder()
+                .groupId("com.internal")
+                .artifactId("our-plugin")
+                .currentVersion("1.0.0")
+                .versionType(VersionType.PLUGIN)
+                .repoOwner("myorg")
+                .repoName("with-plugin")
+                .pomPath("pom.xml")
+                .build();
+
+        String result = modifier.updateVersion(xml, match, "2.0.0");
+
+        assertNotEquals(xml, result);
+        assertTrue(result.contains("<artifactId>our-plugin</artifactId>\n                <version>2.0.0</version>"));
+        assertTrue(result.contains("<version>3.12.1</version>"));
+        assertFalse(result.contains("<artifactId>our-plugin</artifactId>\n                <version>1.0.0</version>"));
+    }
+
+    @Test
+    void updateParentPreservesFormatting() {
+        String xml = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <project>
+                    <parent>
+                        <groupId>com.pool</groupId>
+                        <artifactId>pool-parent</artifactId>
+                        <version>1.0.0</version>
+                    </parent>
+                    <modelVersion>4.0.0</modelVersion>
+                    <artifactId>child</artifactId>
+                </project>
+                """;
+
+        DependencyMatch match = DependencyMatch.builder()
+                .groupId("com.pool")
+                .artifactId("pool-parent")
+                .currentVersion("1.0.0")
+                .versionType(VersionType.PARENT)
+                .repoOwner("myorg")
+                .repoName("child")
+                .pomPath("pom.xml")
+                .build();
+
+        String result = modifier.updateVersion(xml, match, "2.0.0");
+        String expected = xml.replace("<version>1.0.0</version>", "<version>2.0.0</version>");
+        assertEquals(expected, result);
+    }
+
     private String loadResource(String name) throws IOException {
         return Files.readString(Path.of("src/test/resources/" + name));
     }

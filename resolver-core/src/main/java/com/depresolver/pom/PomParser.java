@@ -26,7 +26,10 @@ public class PomParser {
             Map<String, String> properties,
             List<DependencyInfo> dependencies,
             List<DependencyInfo> managedDependencies,
-            List<String> modules
+            List<String> modules,
+            DependencyInfo parentDependency,
+            List<DependencyInfo> plugins,
+            List<DependencyInfo> managedPlugins
     ) {}
 
     public record DependencyInfo(
@@ -65,8 +68,12 @@ public class PomParser {
             List<DependencyInfo> dependencies = parseDependencies(root, "dependencies", properties);
             List<DependencyInfo> managedDependencies = parseManagedDependencies(root, properties);
             List<String> modules = parseModules(root);
+            DependencyInfo parentDependency = parseParent(parentEl, properties);
+            List<DependencyInfo> plugins = parsePlugins(root, properties);
+            List<DependencyInfo> managedPlugins = parseManagedPlugins(root, properties);
 
-            return new PomInfo(groupId, artifactId, version, properties, dependencies, managedDependencies, modules);
+            return new PomInfo(groupId, artifactId, version, properties, dependencies,
+                    managedDependencies, modules, parentDependency, plugins, managedPlugins);
         } catch (Exception e) {
             throw new RuntimeException("Failed to parse pom.xml", e);
         }
@@ -180,6 +187,50 @@ public class PomParser {
         }
 
         return new DependencyInfo(gId, aId, rawVersion, resolvedVersion, type, propertyKey);
+    }
+
+    private DependencyInfo parseParent(Element parentEl, Map<String, String> properties) {
+        if (parentEl == null) return null;
+        return parseSingleDependency(parentEl, properties);
+    }
+
+    private List<DependencyInfo> parsePlugins(Element root, Map<String, String> properties) {
+        List<DependencyInfo> plugins = new ArrayList<>();
+        Element buildEl = getDirectChildElement(root, "build");
+        if (buildEl == null) return plugins;
+
+        Element pluginsEl = getDirectChildElement(buildEl, "plugins");
+        if (pluginsEl == null) return plugins;
+
+        NodeList pluginNodes = pluginsEl.getElementsByTagName("plugin");
+        for (int i = 0; i < pluginNodes.getLength(); i++) {
+            Element pluginEl = (Element) pluginNodes.item(i);
+            if (!pluginEl.getParentNode().equals(pluginsEl)) continue;
+            DependencyInfo info = parseSingleDependency(pluginEl, properties);
+            if (info != null && info.rawVersion() != null) plugins.add(info);
+        }
+        return plugins;
+    }
+
+    private List<DependencyInfo> parseManagedPlugins(Element root, Map<String, String> properties) {
+        List<DependencyInfo> plugins = new ArrayList<>();
+        Element buildEl = getDirectChildElement(root, "build");
+        if (buildEl == null) return plugins;
+
+        Element pmEl = getDirectChildElement(buildEl, "pluginManagement");
+        if (pmEl == null) return plugins;
+
+        Element pluginsEl = getDirectChildElement(pmEl, "plugins");
+        if (pluginsEl == null) return plugins;
+
+        NodeList pluginNodes = pluginsEl.getElementsByTagName("plugin");
+        for (int i = 0; i < pluginNodes.getLength(); i++) {
+            Element pluginEl = (Element) pluginNodes.item(i);
+            if (!pluginEl.getParentNode().equals(pluginsEl)) continue;
+            DependencyInfo info = parseSingleDependency(pluginEl, properties);
+            if (info != null && info.rawVersion() != null) plugins.add(info);
+        }
+        return plugins;
     }
 
     private List<String> parseModules(Element root) {

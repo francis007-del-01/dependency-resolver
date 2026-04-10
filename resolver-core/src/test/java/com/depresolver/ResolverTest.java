@@ -10,6 +10,8 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -114,6 +116,61 @@ class ResolverTest {
         assertTrue(updated.contains("<version>2.0.0</version>"));
         assertTrue(updated.contains("<version>1.0.0</version>"));
         assertFalse(updated.contains("<version>0.9.0</version>"));
+    }
+
+    @Test
+    void sharedPropertyBumpRecordsOnlyOnce() {
+        String pomContent = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <project>
+                    <modelVersion>4.0.0</modelVersion>
+                    <groupId>com.example</groupId>
+                    <artifactId>shared-prop</artifactId>
+                    <version>1.0.0</version>
+                    <properties>
+                        <pool.version>1.0.0</pool.version>
+                    </properties>
+                    <dependencies>
+                        <dependency>
+                            <groupId>com.pool</groupId>
+                            <artifactId>pool-core</artifactId>
+                            <version>${pool.version}</version>
+                        </dependency>
+                        <dependency>
+                            <groupId>com.pool</groupId>
+                            <artifactId>pool-api</artifactId>
+                            <version>${pool.version}</version>
+                        </dependency>
+                    </dependencies>
+                </project>
+                """;
+
+        var match1 = com.depresolver.scanner.DependencyMatch.builder()
+                .groupId("com.pool").artifactId("pool-core").currentVersion("1.0.0")
+                .versionType(com.depresolver.scanner.DependencyMatch.VersionType.PROPERTY)
+                .propertyKey("pool.version").repoOwner("myorg").repoName("shared-prop").pomPath("pom.xml")
+                .build();
+        var match2 = com.depresolver.scanner.DependencyMatch.builder()
+                .groupId("com.pool").artifactId("pool-api").currentVersion("1.0.0")
+                .versionType(com.depresolver.scanner.DependencyMatch.VersionType.PROPERTY)
+                .propertyKey("pool.version").repoOwner("myorg").repoName("shared-prop").pomPath("pom.xml")
+                .build();
+
+        List<String> recordedBumps = new ArrayList<>();
+
+        String updated = pomModifier.updateVersion(pomContent, match1, "2.0.0");
+        if (!updated.equals(pomContent)) {
+            recordedBumps.add("pool-core");
+        }
+
+        String updated2 = pomModifier.updateVersion(updated, match2, "2.0.0");
+        if (!updated2.equals(updated)) {
+            recordedBumps.add("pool-api");
+        }
+
+        assertTrue(updated.contains("<pool.version>2.0.0</pool.version>"));
+        assertEquals(1, recordedBumps.size(), "Only one bump should be recorded when both deps share a property");
+        assertEquals("pool-core", recordedBumps.get(0));
     }
 
     @Test

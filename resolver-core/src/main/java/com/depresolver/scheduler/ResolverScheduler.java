@@ -124,6 +124,23 @@ public class ResolverScheduler implements CommandLineRunner {
             updatedPom = checkAndBump(dep, type, latestVersions, metadata, updatedPom, bumps);
         }
 
+        if (pomInfo.parentDependency() != null) {
+            VersionType type = pomInfo.parentDependency().versionType() == VersionType.DIRECT
+                    ? VersionType.PARENT : pomInfo.parentDependency().versionType();
+            updatedPom = checkAndBump(pomInfo.parentDependency(), type, latestVersions, metadata, updatedPom, bumps);
+        }
+
+        for (DependencyInfo plugin : pomInfo.plugins()) {
+            VersionType type = plugin.versionType() == VersionType.DIRECT
+                    ? VersionType.PLUGIN : plugin.versionType();
+            updatedPom = checkAndBump(plugin, type, latestVersions, metadata, updatedPom, bumps);
+        }
+        for (DependencyInfo plugin : pomInfo.managedPlugins()) {
+            VersionType type = plugin.versionType() == VersionType.DIRECT
+                    ? VersionType.PLUGIN : plugin.versionType();
+            updatedPom = checkAndBump(plugin, type, latestVersions, metadata, updatedPom, bumps);
+        }
+
         if (bumps.isEmpty()) {
             log.debug("{}:{} ({}) is up to date", groupId, artifactId, branch);
             return 0;
@@ -155,7 +172,10 @@ public class ResolverScheduler implements CommandLineRunner {
                 .pomPath(metadata.getPomPath())
                 .build();
 
-        bumps.add(new BumpedDependency(dep.groupId(), dep.artifactId(), dep.resolvedVersion(), latestVersion));
-        return pomModifier.updateVersion(pomContent, match, latestVersion);
+        String updatedPom = pomModifier.updateVersion(pomContent, match, latestVersion);
+        if (!updatedPom.equals(pomContent)) {
+            bumps.add(new BumpedDependency(dep.groupId(), dep.artifactId(), dep.resolvedVersion(), latestVersion));
+        }
+        return updatedPom;
     }
 }

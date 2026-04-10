@@ -22,6 +22,8 @@ public class PomModifier {
         return switch (match.getVersionType()) {
             case PROPERTY -> updatePropertyVersion(pomContent, match.getPropertyKey(), match.getCurrentVersion(), newVersion);
             case DIRECT, MANAGED -> updateDirectVersion(pomContent, match.getGroupId(), match.getArtifactId(), match.getCurrentVersion(), newVersion);
+            case PARENT -> updateParentVersion(pomContent, match.getGroupId(), match.getArtifactId(), match.getCurrentVersion(), newVersion);
+            case PLUGIN -> updatePluginVersion(pomContent, match.getGroupId(), match.getArtifactId(), match.getCurrentVersion(), newVersion);
         };
     }
 
@@ -114,6 +116,105 @@ public class PomModifier {
         }
 
         log.warn("Could not find dependency block for {}:{} with version {}", groupId, artifactId, oldVersion);
+        return pomContent;
+    }
+
+    private String updateParentVersion(String pomContent, String groupId, String artifactId,
+                                      String oldVersion, String newVersion) {
+        int parentStart = pomContent.indexOf("<parent>");
+        if (parentStart == -1) {
+            log.warn("No <parent> block found in pom.xml");
+            return pomContent;
+        }
+        int parentEnd = pomContent.indexOf("</parent>", parentStart);
+        if (parentEnd == -1) {
+            log.warn("No closing </parent> tag found");
+            return pomContent;
+        }
+        parentEnd += "</parent>".length();
+
+        String block = pomContent.substring(parentStart, parentEnd);
+        if (!blockContainsTag(block, "groupId", groupId) || !blockContainsTag(block, "artifactId", artifactId)) {
+            log.warn("Parent block does not match {}:{}", groupId, artifactId);
+            return pomContent;
+        }
+
+        int versionTagStart = block.indexOf("<version>");
+        if (versionTagStart == -1) {
+            log.warn("No <version> tag in parent block for {}:{}", groupId, artifactId);
+            return pomContent;
+        }
+        int versionValueStart = versionTagStart + "<version>".length();
+        int versionCloseTag = block.indexOf("</version>", versionValueStart);
+        if (versionCloseTag == -1) {
+            log.warn("No closing </version> tag in parent block");
+            return pomContent;
+        }
+
+        String currentVersion = block.substring(versionValueStart, versionCloseTag);
+        if (!currentVersion.trim().equals(oldVersion)) {
+            log.warn("Parent version is '{}', expected '{}'", currentVersion.trim(), oldVersion);
+            return pomContent;
+        }
+
+        int absoluteVersionStart = parentStart + versionValueStart;
+        int absoluteVersionEnd = parentStart + versionCloseTag;
+        String newValue = currentVersion.replace(oldVersion, newVersion);
+
+        String result = pomContent.substring(0, absoluteVersionStart) + newValue + pomContent.substring(absoluteVersionEnd);
+        log.info("Updated parent {}:{} from {} to {}", groupId, artifactId, oldVersion, newVersion);
+        return result;
+    }
+
+    private String updatePluginVersion(String pomContent, String groupId, String artifactId,
+                                       String oldVersion, String newVersion) {
+        int searchFrom = 0;
+        while (true) {
+            int blockStart = pomContent.indexOf("<plugin>", searchFrom);
+            if (blockStart == -1) break;
+
+            int blockEnd = pomContent.indexOf("</plugin>", blockStart);
+            if (blockEnd == -1) break;
+            blockEnd += "</plugin>".length();
+
+            String block = pomContent.substring(blockStart, blockEnd);
+
+            boolean hasGroupId = blockContainsTag(block, "groupId", groupId);
+            boolean hasArtifactId = blockContainsTag(block, "artifactId", artifactId);
+
+            if (hasGroupId && hasArtifactId) {
+                int versionTagStart = block.indexOf("<version>");
+                if (versionTagStart == -1) {
+                    log.warn("No <version> tag in plugin block for {}:{}", groupId, artifactId);
+                    return pomContent;
+                }
+
+                int versionValueStart = versionTagStart + "<version>".length();
+                int versionCloseTag = block.indexOf("</version>", versionValueStart);
+                if (versionCloseTag == -1) {
+                    log.warn("No closing </version> tag for plugin {}:{}", groupId, artifactId);
+                    return pomContent;
+                }
+
+                String currentVersion = block.substring(versionValueStart, versionCloseTag);
+                if (!currentVersion.trim().equals(oldVersion)) {
+                    searchFrom = blockEnd;
+                    continue;
+                }
+
+                int absoluteVersionStart = blockStart + versionValueStart;
+                int absoluteVersionEnd = blockStart + versionCloseTag;
+                String newValue = currentVersion.replace(oldVersion, newVersion);
+
+                String result = pomContent.substring(0, absoluteVersionStart) + newValue + pomContent.substring(absoluteVersionEnd);
+                log.info("Updated plugin {}:{} from {} to {}", groupId, artifactId, oldVersion, newVersion);
+                return result;
+            }
+
+            searchFrom = blockEnd;
+        }
+
+        log.warn("Could not find plugin block for {}:{} with version {}", groupId, artifactId, oldVersion);
         return pomContent;
     }
 

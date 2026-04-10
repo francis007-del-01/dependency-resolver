@@ -16,7 +16,10 @@ public class PropertyResolver {
         if (matcher.matches()) {
             String key = matcher.group(1);
             String resolved = properties.get(key);
-            return resolved != null ? resolved : value;
+            if (resolved != null && !isPropertyReference(resolved)) {
+                return resolved;
+            }
+            return null;
         }
         return value;
     }
