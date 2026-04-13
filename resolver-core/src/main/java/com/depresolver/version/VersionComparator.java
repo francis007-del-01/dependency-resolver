@@ -1,4 +1,4 @@
-package com.depresolver.registry;
+package com.depresolver.version;
 
 public class VersionComparator {
 

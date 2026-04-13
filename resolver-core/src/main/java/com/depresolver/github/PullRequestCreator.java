@@ -1,6 +1,5 @@
 package com.depresolver.github;
 
-import com.depresolver.registry.ArtifactEntry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -19,74 +18,98 @@ public class PullRequestCreator {
         this.branchPrefix = branchPrefix;
     }
 
-    public record BumpedDependency(String groupId, String artifactId, String oldVersion, String newVersion) {}
+    public record BumpedDependency(String groupId, String artifactId, String oldVersion, String newVersion, String updatedBy) {}
 
-    public GitHubClient.PrResult createUpdatePr(ArtifactEntry target, String targetBranch,
+    public GitHubClient.PrResult createUpdatePr(String owner, String repo, String pomPath, String targetBranch,
                                                   String updatedPomContent,
                                                   List<BumpedDependency> bumps, boolean dryRun) throws Exception {
-        String owner = target.getRepoOwner();
-        String repo = target.getRepoName();
-        String pomPath = target.getPomPath();
+        String branchName = "%s/%s/dep-updates".formatted(branchPrefix, targetBranch);
 
-        String branchSuffix = bumps.size() == 1
-                ? "bump-%s-to-%s".formatted(bumps.get(0).artifactId(), bumps.get(0).newVersion())
-                : "bump-deps-%d".formatted(Math.abs(bumps.hashCode()) % 100000);
-        String branchName = "%s/%s/%s".formatted(branchPrefix, targetBranch, branchSuffix);
+        String commitMessage = bumps.size() == 1
+                ? "chore(deps): update %s:%s to %s".formatted(bumps.get(0).groupId(), bumps.get(0).artifactId(), bumps.get(0).newVersion())
+                : "chore(deps): update %d dependencies".formatted(bumps.size());
+        String prTitle = "chore(deps): automated dependency updates for %s".formatted(targetBranch);
+        String prBody = buildPrBody(bumps);
 
-        // Idempotency: check if branch or PR already exists
-        if (gitHubClient.branchExists(owner, repo, branchName)) {
-            log.info("Branch {} already exists in {}/{}. Skipping.", branchName, owner, repo);
-            return null;
+        if (dryRun) {
+            log.info("[DRY RUN] Would create/update PR in {}/{} to update: {}", owner, repo,
+                    bumps.stream().map(b -> "%s:%s -> %s".formatted(b.groupId(), b.artifactId(), b.newVersion()))
+                            .collect(Collectors.joining(", ")));
+            return new GitHubClient.PrResult(0, "dry-run");
         }
 
-        if (gitHubClient.pullRequestExists(owner, repo, branchName)) {
-            log.info("PR already exists for branch {} in {}/{}. Skipping.", branchName, owner, repo);
-            return null;
+        boolean branchAlreadyExists = gitHubClient.branchExists(owner, repo, branchName);
+        GitHubClient.PrResult existingPr = branchAlreadyExists
+                ? gitHubClient.findOpenPr(owner, repo, branchName)
+                : null;
+
+        if (!branchAlreadyExists) {
+            String headSha = gitHubClient.getBranchSha(owner, repo, targetBranch);
+            gitHubClient.createBranch(owner, repo, branchName, headSha);
         }
 
-        // Get target branch HEAD SHA
-        String headSha = gitHubClient.getBranchSha(owner, repo, targetBranch);
-
-        // Fetch current pom.xml from the library repo to get its SHA for the commit
-        GitHubClient.FileContent pomFile = gitHubClient.getFileContent(owner, repo, pomPath, targetBranch);
+        GitHubClient.FileContent pomFile = gitHubClient.getFileContent(owner, repo, pomPath, branchName);
 
         if (updatedPomContent.equals(pomFile.content())) {
             log.info("No change needed for {}/{}", owner, repo);
             return null;
         }
 
-        if (dryRun) {
-            log.info("[DRY RUN] Would create PR in {}/{} to update: {}", owner, repo,
-                    bumps.stream().map(b -> "%s:%s -> %s".formatted(b.groupId(), b.artifactId(), b.newVersion()))
-                            .collect(Collectors.joining(", ")));
-            return new GitHubClient.PrResult(0, "dry-run");
-        }
-
-        // Create branch
-        gitHubClient.createBranch(owner, repo, branchName, headSha);
-
-        // Commit updated pom.xml
-        String commitMessage = bumps.size() == 1
-                ? "chore(deps): update %s:%s to %s".formatted(bumps.get(0).groupId(), bumps.get(0).artifactId(), bumps.get(0).newVersion())
-                : "chore(deps): update %d dependencies".formatted(bumps.size());
         gitHubClient.updateFile(owner, repo, pomPath, updatedPomContent,
                 pomFile.sha(), branchName, commitMessage);
 
-        // Create PR
-        String prTitle = commitMessage;
+        if (existingPr != null) {
+            gitHubClient.updatePullRequest(owner, repo, existingPr.number(), prTitle, prBody);
+            log.info("Updated PR #{}: {} ({})", existingPr.number(), existingPr.url(), owner + "/" + repo);
+            return existingPr;
+        } else {
+            GitHubClient.PrResult result = gitHubClient.createPullRequest(owner, repo, prTitle, prBody, branchName, targetBranch);
+            log.info("Created PR #{}: {} ({})", result.number(), result.url(), owner + "/" + repo);
+            return result;
+        }
+    }
+
+    public void directCommit(String owner, String repo, String pomPath, String targetBranch,
+                             String updatedPomContent, List<BumpedDependency> bumps) throws Exception {
+        GitHubClient.FileContent pomFile = gitHubClient.getFileContent(owner, repo, pomPath, targetBranch);
+
+        if (updatedPomContent.equals(pomFile.content())) {
+            log.info("No change needed for {}/{} ({})", owner, repo, targetBranch);
+            return;
+        }
+
         String bumpList = bumps.stream()
-                .map(b -> "- `%s:%s` from `%s` to `%s`".formatted(b.groupId(), b.artifactId(), b.oldVersion(), b.newVersion()))
+                .map(b -> "- %s:%s %s -> %s (by @%s)".formatted(
+                        b.groupId(), b.artifactId(), b.oldVersion(), b.newVersion(),
+                        b.updatedBy() != null ? b.updatedBy() : "unknown"))
                 .collect(Collectors.joining("\n"));
-        String prBody = """
+
+        String mentions = bumps.stream()
+                .map(BumpedDependency::updatedBy)
+                .filter(u -> u != null && !"unknown".equals(u))
+                .distinct()
+                .map(u -> "@" + u.replaceFirst("^@", ""))
+                .collect(Collectors.joining(" "));
+
+        String commitMessage = "chore(deps): auto-update dependencies\n\n%s\n\ncc %s".formatted(bumpList, mentions);
+
+        gitHubClient.updateFile(owner, repo, pomPath, updatedPomContent,
+                pomFile.sha(), targetBranch, commitMessage);
+        log.info("Auto-merged to {}/{} ({}) — notified: {}", owner, repo, targetBranch, mentions);
+    }
+
+    private String buildPrBody(List<BumpedDependency> bumps) {
+        String bumpList = bumps.stream()
+                .map(b -> "- `%s:%s` from `%s` to `%s` (deployed by %s)".formatted(
+                        b.groupId(), b.artifactId(), b.oldVersion(), b.newVersion(),
+                        b.updatedBy() != null ? b.updatedBy() : "unknown"))
+                .collect(Collectors.joining("\n"));
+        return """
                 ## Automated Dependency Update
 
                 %s
 
                 This PR was created automatically by the dependency-resolver.
                 """.formatted(bumpList);
-
-        GitHubClient.PrResult result = gitHubClient.createPullRequest(owner, repo, prTitle, prBody, branchName, targetBranch);
-        log.info("PR created: {} ({})", result.url(), owner + "/" + repo);
-        return result;
     }
 }

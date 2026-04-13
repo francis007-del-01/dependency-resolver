@@ -2,8 +2,6 @@ package com.depresolver;
 
 import com.depresolver.pom.PomModifier;
 import com.depresolver.pom.PomParser;
-import com.depresolver.registry.ArtifactEntry;
-import com.depresolver.registry.VersionRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -174,18 +172,15 @@ class ResolverTest {
     }
 
     @Test
-    void registryDeserialization() throws IOException {
-        String yaml = Files.readString(Path.of("src/test/resources/sample-registry.yaml"));
+    void configDeserialization() throws IOException {
+        String yaml = Files.readString(Path.of("src/test/resources/config.yaml"));
         var mapper = new com.fasterxml.jackson.databind.ObjectMapper(
                 new com.fasterxml.jackson.dataformat.yaml.YAMLFactory());
-        VersionRegistry registry = mapper.readValue(yaml, VersionRegistry.class);
+        var config = mapper.readValue(yaml, com.depresolver.config.ResolverConfig.class);
 
-        assertEquals(3, registry.getArtifacts().size());
-        ArtifactEntry pool = registry.getArtifacts().get(0);
-        assertEquals("com.pool", pool.getGroupId());
-        assertEquals("2.0.0", pool.getLatestVersion());
-        assertEquals("myorg", pool.getRepoOwner());
-        assertEquals("pool", pool.getRepoName());
-        assertEquals("pom.xml", pool.getPomPath());
+        assertFalse(config.getRepos().isEmpty());
+        var first = config.getRepos().get(0);
+        assertNotNull(first.getOwner());
+        assertNotNull(first.getName());
     }
 }

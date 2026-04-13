@@ -161,9 +161,35 @@ public class GitHubClient {
     }
 
     public boolean pullRequestExists(String owner, String repo, String head) throws IOException, InterruptedException {
+        return findOpenPr(owner, repo, head) != null;
+    }
+
+    public PrResult findOpenPr(String owner, String repo, String head) throws IOException, InterruptedException {
         String url = "%s/repos/%s/%s/pulls?head=%s:%s&state=open".formatted(API_BASE, owner, repo, owner, head);
         JsonNode node = get(url);
-        return node.isArray() && !node.isEmpty();
+        if (node.isArray() && !node.isEmpty()) {
+            JsonNode pr = node.get(0);
+            return new PrResult(pr.get("number").asInt(), pr.get("html_url").asText());
+        }
+        return null;
+    }
+
+    public void updatePullRequest(String owner, String repo, int prNumber, String title, String body) throws IOException, InterruptedException {
+        String url = "%s/repos/%s/%s/pulls/%d".formatted(API_BASE, owner, repo, prNumber);
+        ObjectNode requestBody = MAPPER.createObjectNode();
+        requestBody.put("title", title);
+        requestBody.put("body", body);
+        patch(url, requestBody);
+        log.info("Updated PR #{} in {}/{}", prNumber, owner, repo);
+    }
+
+    public void updateBranchRef(String owner, String repo, String branchName, String newSha) throws IOException, InterruptedException {
+        String url = "%s/repos/%s/%s/git/refs/heads/%s".formatted(API_BASE, owner, repo, branchName);
+        ObjectNode body = MAPPER.createObjectNode();
+        body.put("sha", newSha);
+        body.put("force", true);
+        patch(url, body);
+        log.info("Updated branch {} to {} in {}/{}", branchName, newSha.substring(0, 7), owner, repo);
     }
 
     public record PrResult(int number, String url) {}
@@ -193,6 +219,22 @@ public class GitHubClient {
                 .header("X-GitHub-Api-Version", "2022-11-28")
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body)))
+                .build();
+
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        checkRateLimit(response);
+        checkResponse(response, url);
+        return MAPPER.readTree(response.body());
+    }
+
+    private JsonNode patch(String url, ObjectNode body) throws IOException, InterruptedException {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Authorization", "Bearer " + token)
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .header("Content-Type", "application/json")
+                .method("PATCH", HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body)))
                 .build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
