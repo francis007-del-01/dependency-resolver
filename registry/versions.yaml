@@ -1,11 +1,11 @@
 artifacts:
   - groupId: com.myorg
     artifactId: core-lib
-    latestVersion: 5.0.0
+    latestVersion: 6.0.0
     repoOwner: francis007-del-01
     repoName: core-lib
     pomPath: pom.xml
-    updatedBy: jane.smith@intuit.com
+    updatedBy: namin2
     updatedAt: "2026-04-13T00:00:00Z"
   - groupId: com.myorg
     artifactId: test-service
@@ -13,5 +13,5 @@ artifacts:
     repoOwner: francis007-del-01
     repoName: test-service
     pomPath: pom.xml
-    updatedBy: jane.smith@intuit.com
+    updatedBy: namin2
     updatedAt: "2026-04-13T00:00:00Z"
