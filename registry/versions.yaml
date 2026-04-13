@@ -1,1 +1,29 @@
-artifacts: []
+artifacts:
+  - groupId: com.myorg
+    artifactId: core-lib
+    latestVersion: 2.0.0
+    repoOwner: francis007-del-01
+    repoName: core-lib
+    pomPath: pom.xml
+    updatedAt: "2026-04-13T00:00:00Z"
+  - groupId: com.myorg
+    artifactId: utils
+    latestVersion: 1.5.0
+    repoOwner: francis007-del-01
+    repoName: utils
+    pomPath: pom.xml
+    updatedAt: "2026-04-13T00:00:00Z"
+  - groupId: com.myorg
+    artifactId: service-a
+    latestVersion: 1.0.0
+    repoOwner: francis007-del-01
+    repoName: service-a
+    pomPath: pom.xml
+    updatedAt: "2026-04-13T00:00:00Z"
+  - groupId: com.myorg
+    artifactId: service-b
+    latestVersion: 3.0.0
+    repoOwner: francis007-del-01
+    repoName: service-b
+    pomPath: pom.xml
+    updatedAt: "2026-04-13T00:00:00Z"

@@ -13,13 +13,13 @@ pipeline {
     stages {
         stage('Build') {
             steps {
-                sh 'mvn clean package -pl resolver-core -am -DskipTests'
+                sh 'cd /var/jenkins_home/project && mvn clean package -pl resolver-core -am -DskipTests'
             }
         }
         stage('Run') {
             steps {
                 withCredentials([string(credentialsId: 'github-api-token', variable: 'GITHUB_TOKEN')]) {
-                    sh 'java -jar resolver-core/target/resolver-core-1.0.0-SNAPSHOT.jar'
+                    sh 'java -jar /var/jenkins_home/project/resolver-core/target/resolver-core-1.0.0-SNAPSHOT.jar'
                 }
             }
         }

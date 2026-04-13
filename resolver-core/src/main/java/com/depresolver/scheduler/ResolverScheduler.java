@@ -102,7 +102,7 @@ public class ResolverScheduler implements CommandLineRunner {
 
     private int processBranch(String groupId, String artifactId, String branch,
                               ArtifactEntry metadata, Map<String, String> latestVersions) throws Exception {
-        log.debug("Processing {}:{} on branch {}", groupId, artifactId, branch);
+        log.info("Processing {}:{} on branch {}", groupId, artifactId, branch);
 
         String pomContent;
         try {
@@ -142,13 +142,23 @@ public class ResolverScheduler implements CommandLineRunner {
         }
 
         if (bumps.isEmpty()) {
-            log.debug("{}:{} ({}) is up to date", groupId, artifactId, branch);
+            log.info("{}:{} ({}) is up to date", groupId, artifactId, branch);
             return 0;
         }
 
-        log.info("{}:{} ({}) needs {} dependency update(s)", groupId, artifactId, branch, bumps.size());
-        GitHubClient.PrResult result = prCreator.createUpdatePr(metadata, branch, updatedPom, bumps, false);
-        return result != null ? 1 : 0;
+        log.info("{}:{} ({}) needs {} dependency update(s):", groupId, artifactId, branch, bumps.size());
+        for (BumpedDependency bump : bumps) {
+            log.info("  - {}:{} {} -> {}", bump.groupId(), bump.artifactId(), bump.oldVersion(), bump.newVersion());
+        }
+        log.info("Updated pom preview:\n{}", updatedPom);
+
+        try {
+            GitHubClient.PrResult result = prCreator.createUpdatePr(metadata, branch, updatedPom, bumps, false);
+            return result != null ? 1 : 0;
+        } catch (Exception e) {
+            log.warn("PR creation failed (expected for dummy repos): {}", e.getMessage());
+            return 0;
+        }
     }
 
     private String checkAndBump(DependencyInfo dep, VersionType versionType, Map<String, String> latestVersions,

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.myorg</groupId>
+    <artifactId>service-a</artifactId>
+    <version>1.1.0-SNAPSHOT</version>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.myorg</groupId>
+            <artifactId>core-lib</artifactId>
+            <version>1.9.0</version>
+        </dependency>
+        <dependency>
+            <groupId>com.myorg</groupId>
+            <artifactId>utils</artifactId>
+            <version>1.5.0</version>
+        </dependency>
+    </dependencies>
+</project>
