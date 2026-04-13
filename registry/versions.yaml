@@ -8,26 +8,10 @@ artifacts:
     updatedBy: namin2@intuit.com
     updatedAt: "2026-04-13T00:00:00Z"
   - groupId: com.myorg
-    artifactId: utils
-    latestVersion: 1.5.0
-    repoOwner: francis007-del-01
-    repoName: utils
-    pomPath: pom.xml
-    updatedBy: john.doe@intuit.com
-    updatedAt: "2026-04-13T00:00:00Z"
-  - groupId: com.myorg
-    artifactId: service-a
+    artifactId: test-service
     latestVersion: 1.0.0
     repoOwner: francis007-del-01
-    repoName: service-a
+    repoName: test-service
     pomPath: pom.xml
     updatedBy: namin2@intuit.com
-    updatedAt: "2026-04-13T00:00:00Z"
-  - groupId: com.myorg
-    artifactId: service-b
-    latestVersion: 3.0.0
-    repoOwner: francis007-del-01
-    repoName: service-b
-    pomPath: pom.xml
-    updatedBy: jane.smith@intuit.com
     updatedAt: "2026-04-13T00:00:00Z"
