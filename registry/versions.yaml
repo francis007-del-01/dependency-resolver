@@ -1,7 +1,7 @@
 artifacts:
   - groupId: com.myorg
     artifactId: core-lib
-    latestVersion: 4.0.0
+    latestVersion: 5.0.0
     repoOwner: francis007-del-01
     repoName: core-lib
     pomPath: pom.xml
