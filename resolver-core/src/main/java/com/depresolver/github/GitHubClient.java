@@ -117,6 +117,20 @@ public class GitHubClient {
         return node.get("default_branch").asText();
     }
 
+    public String getLastCommitter(String owner, String repo, String branch) {
+        try {
+            String url = "%s/repos/%s/%s/commits/%s".formatted(API_BASE, owner, repo, branch);
+            JsonNode node = get(url);
+            JsonNode author = node.get("author");
+            if (author != null && !author.isNull()) {
+                return author.get("login").asText();
+            }
+        } catch (Exception e) {
+            log.debug("Could not get last committer for {}/{}: {}", owner, repo, e.getMessage());
+        }
+        return null;
+    }
+
     public String getBranchSha(String owner, String repo, String branch) throws IOException, InterruptedException {
         String url = "%s/repos/%s/%s/git/ref/heads/%s".formatted(API_BASE, owner, repo, branch);
         JsonNode node = get(url);

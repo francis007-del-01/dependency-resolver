@@ -62,8 +62,15 @@ public class ResolverScheduler implements CommandLineRunner {
                     if (pomInfo.groupId() != null && pomInfo.artifactId() != null && pomInfo.version() != null) {
                         String key = pomInfo.groupId() + ":" + pomInfo.artifactId();
                         latestVersions.put(key, pomInfo.version());
-                        log.info("  {} = {} (from {}/{}:{})", key, pomInfo.version(),
-                                repo.getOwner(), repo.getName(), repo.getTriggerBranch());
+
+                        String committer = gitHubClient.getLastCommitter(repo.getOwner(), repo.getName(), repo.getTriggerBranch());
+                        if (committer != null) {
+                            updatedByMap.put(key, committer);
+                        }
+
+                        log.info("  {} = {} (from {}/{}:{}, by {})", key, pomInfo.version(),
+                                repo.getOwner(), repo.getName(), repo.getTriggerBranch(),
+                                committer != null ? committer : "unknown");
                     }
                 } catch (Exception e) {
                     log.warn("Could not read trigger version from {}/{}: {}", repo.getOwner(), repo.getName(), e.getMessage());
@@ -79,7 +86,7 @@ public class ResolverScheduler implements CommandLineRunner {
 
                 for (BranchConfig branch : repo.getTargetBranches()) {
                     try {
-                        int result = processBranch(repo, branch, latestVersions);
+                        int result = processBranch(repo, branch, latestVersions, updatedByMap);
                         if (result > 0) created++;
                         else skipped++;
                     } catch (Exception e) {
@@ -95,7 +102,8 @@ public class ResolverScheduler implements CommandLineRunner {
         }
     }
 
-    private int processBranch(RepoConfig repo, BranchConfig branch, Map<String, String> latestVersions) throws Exception {
+    private int processBranch(RepoConfig repo, BranchConfig branch, Map<String, String> latestVersions,
+                              Map<String, String> updatedByMap) throws Exception {
         log.info("Processing {}/{} on branch {}", repo.getOwner(), repo.getName(), branch.getName());
 
         String pomContent = fetchPom(repo.getOwner(), repo.getName(), repo.getPomPath(), branch.getName());
@@ -105,11 +113,11 @@ public class ResolverScheduler implements CommandLineRunner {
         String updatedPom = pomContent;
 
         for (DependencyInfo dep : pomInfo.dependencies()) {
-            updatedPom = checkAndBump(dep, dep.versionType(), latestVersions, repo, updatedPom, bumps);
+            updatedPom = checkAndBump(dep, dep.versionType(), latestVersions, updatedByMap, repo, updatedPom, bumps);
         }
         for (DependencyInfo dep : pomInfo.managedDependencies()) {
             VersionType type = dep.versionType() == VersionType.DIRECT ? VersionType.MANAGED : dep.versionType();
-            updatedPom = checkAndBump(dep, type, latestVersions, repo, updatedPom, bumps);
+            updatedPom = checkAndBump(dep, type, latestVersions, updatedByMap, repo, updatedPom, bumps);
         }
 
         if (bumps.isEmpty()) {
@@ -132,7 +140,8 @@ public class ResolverScheduler implements CommandLineRunner {
     }
 
     private String checkAndBump(DependencyInfo dep, VersionType versionType, Map<String, String> latestVersions,
-                                RepoConfig repo, String pomContent, List<BumpedDependency> bumps) {
+                                Map<String, String> updatedByMap, RepoConfig repo,
+                                String pomContent, List<BumpedDependency> bumps) {
         String key = dep.groupId() + ":" + dep.artifactId();
         String latestVersion = latestVersions.get(key);
 
@@ -152,24 +161,13 @@ public class ResolverScheduler implements CommandLineRunner {
                 .pomPath(repo.getPomPath())
                 .build();
 
-        // Find who deployed this version
-        String updatedBy = findUpdatedBy(dep.groupId(), dep.artifactId());
+        String updatedBy = updatedByMap.getOrDefault(key, "unknown");
 
         String updatedPom = pomModifier.updateVersion(pomContent, match, latestVersion);
         if (!updatedPom.equals(pomContent)) {
             bumps.add(new BumpedDependency(dep.groupId(), dep.artifactId(), dep.resolvedVersion(), latestVersion, updatedBy));
         }
         return updatedPom;
-    }
-
-    private String findUpdatedBy(String groupId, String artifactId) {
-        // Look up who owns this artifact from the config's trigger repos
-        for (RepoConfig repo : resolverConfig.getRepos()) {
-            if (repo.getTriggerBranch() == null) continue;
-            // We'd need to match groupId:artifactId to a repo — for now use repo name as a heuristic
-            // In a real setup, this would come from a more structured mapping
-        }
-        return "unknown";
     }
 
     private String fetchPom(String owner, String repo, String pomPath, String branch) throws Exception {

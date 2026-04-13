@@ -1,289 +1,217 @@
 # Dependency Resolver
 
-Automatically keeps Maven dependency versions up to date across repositories by creating pull requests.
+Automatically keeps Maven dependency versions up to date across repositories by creating pull requests or auto-merging.
 
 ## High-Level Design
 
 ```
 +------------------+          +------------------------------------------+
-|  Library Repos   |          |  This Repo (dependency-resolver-cli)     |
-|                  |          |                                          |
-|  +------------+  |  deploy  |  +------------------------------------+  |
-|  | my-lib     |--+--------->|  | registry/                          |  |
-|  +------------+  |          |  |   versions.yaml  (version index)   |  |
-|                  |          |  |   poms/                             |  |
-|  +------------+  |  deploy  |  |     com.myorg/my-lib/              |  |
-|  | service-b  |--+--------->|  |       master/pom.xml               |  |
-|  +------------+  |          |  |       develop/pom.xml              |  |
-|                  |          |  |     com.myorg/service-b/            |  |
-|  +------------+  |  deploy  |  |       master/pom.xml               |  |
-|  | core-utils |--+--------->|  +------------------------------------+  |
-|  +------------+  |          |                  |                       |
-|       ^          |          |                  | Jenkins cron (10 min) |
-|       |          |          |                  v                       |
-|       |          |          |  +------------------------------------+  |
-|       |          |          |  | CronResolverMain                   |  |
-|       |          |          |  |                                    |  |
-|       |          |          |  | 1. Read versions.yaml (latest ver) |  |
-|       |          |          |  | 2. List all pom folders (consumers)|  |
-|       |          |          |  | 3. For each consumer, each branch: |  |
-|       |          |          |  |    - Read branch pom from registry |  |
-|       |          |          |  |    - Parse dependencies            |  |
-|       |          |          |  |    - Version compare (semver)      |  |
-|       |          |          |  |    - If outdated: create PR        |  |
-|       |          |          |  +------------------------------------+  |
-|       |          |          |                  |                       |
-+-------+----------+          +------------------+-----------------------+
-        |                                        |
-        +---- PRs with bumped pom.xml -----------+
-
-+-----------------------------------------------------------------------+
-|                        Key Components                                 |
-|                                                                       |
-|  Maven Plugin (RegisterVersionMojo)       [resolver-plugin]           |
-|    Runs at deploy time in each library's CI                           |
-|    - Target branch build  -->  push pom to registry                   |
-|    - Trigger branch build -->  push pom + update versions.yaml        |
-|    - Both are optional — configure per library                        |
-|                                                                       |
-|  Registry (registry/ folder in this repo)                             |
-|    - versions.yaml: index of trigger artifacts + latest versions      |
-|    - poms/: copy of each lib's pom.xml per branch (consumers)         |
-|                                                                       |
-|  Cron Resolver (CronResolverMain)         [resolver-core]             |
-|    Fat JAR run by Jenkins every 10 min                                |
-|    - Iterates pom folders (consumers), not versions.yaml entries      |
-|    - Discovers branches from registry directory structure              |
-|    - Semantic version comparison (no downgrades)                      |
-|    - One PR per lib per branch, batches multiple dep bumps            |
-|                                                                       |
-|  Shared (GitHubClient, RegistryClient)    [resolver-common]           |
-|    - GitHub REST API with rate-limit awareness                        |
-|    - Optimistic locking (SHA-based) with retry on 409                 |
-|    - Idempotent PR creation (branch/PR existence checks)              |
-+-----------------------------------------------------------------------+
+|  Trigger Repos   |          |  This Repo (dependency-resolver)         |
+|  (libraries)     |          |                                          |
+|  +-----------+   |          |  +------------------------------------+  |
+|  | core-lib  |   |  GitHub  |  | config.yaml                        |  |
+|  | (v3.0.0)  |---+--API---->|  |   trigger repos + target repos     |  |
+|  +-----------+   |          |  |   per-branch autoMerge config       |  |
+|  +-----------+   |          |  +------------------------------------+  |
+|  | utils     |   |          |                  |                       |
+|  | (v2.0.0)  |---+--------->|                  | Jenkins cron          |
+|  +-----------+   |          |                  v                       |
++------------------+          |  +------------------------------------+  |
+                              |  | CronResolverMain (Spring Boot)     |  |
++------------------+          |  |                                    |  |
+|  Target Repos    |          |  | 1. Read config.yaml                |  |
+|  (services)      |          |  | 2. Fetch pom from trigger branches |  |
+|       ^          |          |  |    → build latest versions map     |  |
+|       |          |          |  | 3. Fetch pom from target branches  |  |
+|  +-----------+   |          |  |    → diff deps against latest      |  |
+|  | service-b |<--+--PR/-----+  | 4. autoMerge=true → direct commit |  |
+|  +-----------+   |  merge   |  |    autoMerge=false → create PR     |  |
+|  +-----------+   |          |  +------------------------------------+  |
+|  | service-c |<--+----------+                                          |
+|  +-----------+   |          +------------------------------------------+
++------------------+
 ```
-
----
 
 ## How It Works
 
 ```
-Library deploys (mvn deploy)
-  |
-  +-- Plugin receives currentBranch from CI
-  |
-  +-- Target branch (develop, master)?  -->  Push pom.xml to registry
-  +-- Trigger branch (master)?          -->  Push pom.xml + update versions.yaml
-  +-- Neither configured?               -->  Skip
-  
 Jenkins cron (every 10 min)
   |
-  +-- Read versions.yaml (latest versions from trigger branches)
-  +-- List all pom folders in registry (discover consumers)
-  +-- For each consumer, for each branch:
-  |     Read that branch's pom.xml from registry
-  |     Parse dependencies, compare versions (semver)
-  |     If older --> create PR on that branch
+  +-- Read config.yaml
+  |
+  +-- For each trigger repo:
+  |     Fetch pom.xml from trigger branch via GitHub API
+  |     Read groupId:artifactId:version
+  |     Read last committer (for @mentions)
+  |     → Build latest versions map
+  |
+  +-- For each target repo, for each branch:
+  |     Fetch pom.xml from that branch via GitHub API
+  |     Parse dependencies (direct, property, managed)
+  |     Compare against latest versions (semver, no downgrades)
+  |     If outdated:
+  |       autoMerge=true  → commit directly, @mention deployers
+  |       autoMerge=false → create/update PR with deployer info
   +-- Done
 ```
 
-Two concepts:
-- **Trigger branch** — the branch whose deploy updates `versions.yaml` with the new release version. Optional per library.
-- **Target branches** — branches whose poms get pushed to the registry. The cron resolver discovers these from the directory structure and creates PRs for each. Optional per library.
+No plugin. No registry. No `mvn deploy` hook. Just one config file.
 
 ## Quick Start
 
-### 1. Add the plugin to your library's pom.xml
+### 1. Create config.yaml
 
-```xml
-<plugin>
-  <groupId>com.depresolver</groupId>
-  <artifactId>resolver-plugin</artifactId>
-  <version>1.0.0-SNAPSHOT</version>
-  <executions>
-    <execution>
-      <phase>deploy</phase>
-      <goals><goal>register</goal></goals>
-    </execution>
-  </executions>
-  <configuration>
-    <repoOwner>myorg</repoOwner>
-    <repoName>my-lib</repoName>
-    <currentBranch>${env.BRANCH_NAME}</currentBranch>
-    <triggerBranch>master</triggerBranch>
-    <targetBranches>master,develop</targetBranches>
-    <githubToken>${env.GITHUB_TOKEN}</githubToken>
-  </configuration>
-</plugin>
+```yaml
+repos:
+  # Libraries — read their latest version from trigger branch
+  - owner: myorg
+    name: core-lib
+    triggerBranch: master
+
+  - owner: myorg
+    name: utils
+    triggerBranch: master
+
+  # Services — update their deps on target branches
+  - owner: myorg
+    name: my-service
+    targetBranches:
+      - name: main
+        autoMerge: false    # creates PR
+      - name: develop
+        autoMerge: true     # commits directly
+
+  # Library that does both
+  - owner: myorg
+    name: shared-lib
+    triggerBranch: master
+    targetBranches:
+      - name: master
+        autoMerge: false
+      - name: develop
+        autoMerge: true
 ```
 
-### 2. Configuration examples
-
-```xml
-<!-- Library that only publishes versions (trigger only) -->
-<configuration>
-    <repoOwner>myorg</repoOwner>
-    <repoName>core-lib</repoName>
-    <currentBranch>${env.BRANCH_NAME}</currentBranch>
-    <triggerBranch>master</triggerBranch>
-    <githubToken>${env.GITHUB_TOKEN}</githubToken>
-</configuration>
-
-<!-- Service that only receives updates (target only) -->
-<configuration>
-    <repoOwner>myorg</repoOwner>
-    <repoName>my-service</repoName>
-    <currentBranch>${env.BRANCH_NAME}</currentBranch>
-    <targetBranches>master,develop</targetBranches>
-    <githubToken>${env.GITHUB_TOKEN}</githubToken>
-</configuration>
-
-<!-- Library that does both -->
-<configuration>
-    <repoOwner>myorg</repoOwner>
-    <repoName>shared-lib</repoName>
-    <currentBranch>${env.BRANCH_NAME}</currentBranch>
-    <triggerBranch>master</triggerBranch>
-    <targetBranches>master,develop</targetBranches>
-    <githubToken>${env.GITHUB_TOKEN}</githubToken>
-</configuration>
-```
-
-### 3. Run the cron resolver
+### 2. Set GitHub token
 
 ```bash
-GITHUB_TOKEN=your_token java -jar resolver-core.jar
+export GITHUB_TOKEN=ghp_your_token_here
 ```
 
-Or set up the Jenkins cron (see `jenkins-shared-lib/Jenkinsfile`). The app reads config from `application.yml` and environment variables.
+### 3. Run
 
-## Plugin Configuration
+```bash
+java -jar resolver-core.jar
+```
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `repoOwner` | (required) | GitHub owner of your library's repo |
-| `repoName` | (required) | GitHub repo name of your library |
-| `currentBranch` | (required) | Current branch from CI (e.g. `${env.BRANCH_NAME}`) |
-| `githubToken` | (required) | GitHub personal access token |
-| `targetBranches` | (optional) | Comma-separated branches to push poms for |
-| `triggerBranch` | (optional) | Branch whose deploy updates versions.yaml |
-| `pomPath` | `pom.xml` | Path to pom.xml in your repo |
+Or set up Jenkins cron (see `jenkins-shared-lib/Jenkinsfile`).
 
-## Cron Resolver (Spring Boot)
+## Config Reference
 
-The resolver is a Spring Boot application that runs once and exits (triggered by Jenkins cron).
+```yaml
+repos:
+  - owner: myorg              # GitHub org/user (required)
+    name: core-lib             # GitHub repo name (required)
+    pomPath: pom.xml           # path to pom.xml (default: pom.xml)
+    triggerBranch: master      # read version from this branch (optional)
+    targetBranches:            # update deps on these branches (optional)
+      - name: main
+        autoMerge: false       # false = PR, true = direct commit
+      - name: develop
+        autoMerge: true
+```
 
-**Configuration (application.yml):**
+- **triggerBranch** — the cron reads this repo's pom to get the latest version. Set for libraries that publish versions.
+- **targetBranches** — the cron checks these branches for outdated deps and creates PRs or auto-merges. Set for services/libs that consume dependencies.
+- A repo can have both (library that also consumes other libraries).
+- A repo can have neither (listed for future use).
 
+## Application Config
+
+`application.yml`:
 ```yaml
 github:
-  token: ${GITHUB_TOKEN}       # from environment variable
+  token: ${GITHUB_TOKEN}
 
 resolver:
-  branch-prefix: deps           # PR branch prefix
+  branch-prefix: deps
+  config-path: classpath:config.yaml
 ```
 
-```bash
-# Run with env var
-GITHUB_TOKEN=your_token java -jar resolver-core.jar
+## What happens on each run
 
-# Or set env var in Jenkins (automatic via withCredentials)
+| Trigger repo | What the cron does |
+|---|---|
+| `core-lib` (triggerBranch: master) | Fetches `pom.xml` from `core-lib/master`, reads version `3.0.0`, notes last committer `@namin2` |
+
+| Target repo | Branch | autoMerge | What the cron does |
+|---|---|---|---|
+| `service-b` | main | false | Fetches pom, finds `core-lib 1.5.0` → outdated → creates PR with `@namin2` in body |
+| `service-b` | develop | true | Fetches pom, finds `core-lib 1.8.0` → outdated → commits directly, `@namin2` in commit message |
+| `service-c` | main | false | Fetches pom, finds `${core-lib.version}=1.3.0` → outdated → creates PR, property updated |
+
+## PR Behavior
+
+- **Stable branch name:** `deps/{targetBranch}/dep-updates` — no version in name
+- **First run:** creates branch + PR
+- **Second run (new version):** updates the same PR (new commit + updated body)
+- **Multiple deps outdated:** batched into one PR
+- **autoMerge:** commits directly to target branch, @mentions all deployers
+
+### PR body example:
 ```
+## Automated Dependency Update
 
-## Registry
+- `com.myorg:core-lib` from `1.5.0` to `3.0.0` (deployed by @namin2)
+- `com.myorg:utils` from `1.2.0` to `2.0.0` (deployed by @john-doe)
 
-The registry lives in the `registry/` folder of this repo:
-
-```
-registry/
-  versions.yaml                          # Trigger artifacts + latest versions
-  poms/
-    com.myorg/
-      my-lib/
-        master/pom.xml                   # pom from master branch
-        develop/pom.xml                  # pom from develop branch
-      core-utils/
-        master/pom.xml
-```
-
-**versions.yaml** format:
-
-```yaml
-artifacts:
-  - groupId: com.myorg
-    artifactId: my-lib
-    latestVersion: 2.1.0
-    repoOwner: myorg
-    repoName: my-lib
-    pomPath: pom.xml
-    updatedAt: "2026-04-08T10:30:00Z"
+This PR was created automatically by the dependency-resolver.
 ```
 
 ## Project Structure
 
 ```
 dependency-resolver/
-  pom.xml                                  # Parent POM
-  resolver-common/                         # Shared classes
-    github/GitHubClient.java               # GitHub REST API
-    github/GitHubConflictException.java     # 409 exception
-    registry/RegistryClient.java            # Registry read/write + discovery
-    registry/ArtifactEntry.java             # Registry data model
-    registry/VersionRegistry.java           # Registry root model
-    registry/VersionComparator.java         # Semantic version comparison
-  resolver-core/                           # Spring Boot app (cron resolver)
-    ResolverApplication.java               # Spring Boot entry point
-    config/AppConfig.java                  # Bean definitions (@Configuration)
-    scheduler/ResolverScheduler.java       # Resolver logic (CommandLineRunner)
-    github/PullRequestCreator.java         # PR creation + idempotency
-    pom/PomParser.java                     # XML parsing (XXE-safe)
-    pom/PomModifier.java                   # Regex-based version updates
-    pom/PropertyResolver.java              # ${property} resolution
-    scanner/DependencyMatch.java           # Version match DTO
-  resolver-plugin/                         # Maven plugin
-    plugin/RegisterVersionMojo.java        # Deploy-phase Mojo
-  registry/                                # Version registry data
-    versions.yaml
-    poms/
+  pom.xml                                    # Parent POM
+  resolver-core/                             # Spring Boot app
+    src/main/resources/
+      config.yaml                            # Repo configuration
+      application.yml                        # App settings
+    src/main/java/com/depresolver/
+      ResolverApplication.java               # Spring Boot entry
+      config/
+        AppConfig.java                       # Bean definitions
+        ResolverConfig.java                  # Config root model
+        RepoConfig.java                      # Per-repo config
+        BranchConfig.java                    # Per-branch config
+      scheduler/
+        ResolverScheduler.java               # Main logic (CommandLineRunner)
+      github/
+        GitHubClient.java                    # GitHub REST API
+        PullRequestCreator.java              # PR create/update + direct commit
+      pom/
+        PomParser.java                       # DOM-based XML parsing
+        PomModifier.java                     # Format-preserving version updates
+        PropertyResolver.java                # ${property} resolution
+      version/
+        VersionComparator.java               # Semantic version comparison
+      scanner/
+        DependencyMatch.java                 # Version match DTO
   jenkins-shared-lib/
-    Jenkinsfile                            # Cron trigger
-```
-
-## Branch Logic
-
-```
-mvn deploy on develop (targetBranches=master,develop, triggerBranch=master):
-  --> Push pom to registry/poms/{gId}/{aId}/develop/pom.xml
-  --> Do NOT update versions.yaml
-
-mvn deploy on master:
-  --> Push pom to registry/poms/{gId}/{aId}/master/pom.xml
-  --> Update versions.yaml with new release version
-
-mvn deploy on feature-branch:
-  --> Skip entirely (not a target or trigger branch)
-
-Cron resolver:
-  --> Read versions.yaml for latest versions
-  --> List all pom folders in registry (discover consumers + branches)
-  --> For each consumer, for each branch:
-      Read pom, compare versions (semver, no downgrades), create PR
-      PR branch: deps/{targetBranch}/bump-{name}-to-{version}
+    Jenkinsfile                              # Jenkins cron pipeline
 ```
 
 ## Build
 
 ```bash
-# Build everything
-mvn clean install
+# Build
+mvn clean package -pl resolver-core -DskipTests
 
 # Run tests
-mvn clean test
+mvn clean test -pl resolver-core
 
-# Package fat JAR
-mvn clean package -pl resolver-core
-# Output: resolver-core/target/resolver-core-1.0.0-SNAPSHOT.jar
+# Run locally
+GITHUB_TOKEN=your_token java -jar resolver-core/target/resolver-core-1.0.0-SNAPSHOT.jar
 ```
 
 Requires Java 21+.

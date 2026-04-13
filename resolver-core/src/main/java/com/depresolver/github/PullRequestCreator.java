@@ -100,7 +100,7 @@ public class PullRequestCreator {
 
     private String buildPrBody(List<BumpedDependency> bumps) {
         String bumpList = bumps.stream()
-                .map(b -> "- `%s:%s` from `%s` to `%s` (deployed by %s)".formatted(
+                .map(b -> "- `%s:%s` from `%s` to `%s` (deployed by @%s)".formatted(
                         b.groupId(), b.artifactId(), b.oldVersion(), b.newVersion(),
                         b.updatedBy() != null ? b.updatedBy() : "unknown"))
                 .collect(Collectors.joining("\n"));
