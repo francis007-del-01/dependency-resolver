@@ -1,25 +1,12 @@
 pipeline {
     agent any
 
-    parameters {
-        text(name: 'REPOS', defaultValue: '''
-# Format: <github-url>  trigger=<branch>  target=<branch1,branch2>
-# trigger = read version from this branch (source of truth)
-# target  = update dependencies on these branches (create PRs)
-# Both are optional per repo. Examples:
-#
-# https://github.com/myorg/core-lib       trigger=master
-# https://github.com/myorg/service-a      target=master,develop
-# https://github.com/myorg/service-b      trigger=master  target=master,develop
-''', description: 'Repos with trigger/target branches')
-    }
-
-    environment {
-        BRANCH_PREFIX = 'deps'
+    triggers {
+        cron('H/10 * * * *')
     }
 
     options {
-        timeout(time: 30, unit: 'MINUTES')
+        timeout(time: 15, unit: 'MINUTES')
         disableConcurrentBuilds()
     }
 
@@ -28,35 +15,9 @@ pipeline {
             steps {
                 withCredentials([string(credentialsId: 'github-api-token', variable: 'GITHUB_TOKEN')]) {
                     script {
-                        // === Parse input ===
-                        def repoConfigs = parseInput(params.REPOS)
-                        echo "Parsed ${repoConfigs.size()} repos"
-
-                        // === Phase 1: Clone trigger repos, build version map ===
-                        echo "=== Phase 1: Building version map from trigger branches ==="
-                        def latestVersions = buildVersionMap(repoConfigs)
-                        echo "Version map: ${latestVersions.size()} artifacts"
-
-                        // === Phase 2: For each target repo+branch, update deps and create PRs ===
-                        echo "=== Phase 2: Updating target branches ==="
-                        def created = 0, skipped = 0, failed = 0
-
-                        for (config in repoConfigs) {
-                            if (!config.targetBranches) continue
-
-                            for (branch in config.targetBranches) {
-                                try {
-                                    def result = updateAndPr(config, branch, latestVersions)
-                                    if (result == 1) created++
-                                    else skipped++
-                                } catch (Exception e) {
-                                    echo "Failed ${config.owner}/${config.name} (${branch}): ${e.message}"
-                                    failed++
-                                }
-                            }
-                        }
-
-                        echo "=== Done. PRs created: ${created}, Skipped: ${skipped}, Failed: ${failed} ==="
+                        def config = readYamlConfig()
+                        def latestVersions = buildVersionMap(config)
+                        processTargets(config, latestVersions)
                     }
                 }
             }
@@ -64,189 +25,340 @@ pipeline {
     }
 
     post {
-        always { deleteDir() }
+        failure { echo "Dependency resolver failed." }
+        success { echo "Dependency resolver completed." }
     }
 }
 
-// --- Parse input lines into repo configs ---
-def parseInput(String input) {
-    def configs = []
-    for (line in input.trim().split('\n')) {
-        line = line.trim()
-        if (!line || line.startsWith('#')) continue
+// ===================== CONFIG =====================
 
-        def match = (line =~ /github\.com\/([^\/]+)\/([^\/\.\s]+)/)
-        if (!match) continue
-
-        def owner = match[0][1]
-        def name = match[0][2]
-
-        def triggerMatch = (line =~ /trigger=(\S+)/)
-        def triggerBranch = triggerMatch ? triggerMatch[0][1] : null
-
-        def targetMatch = (line =~ /target=(\S+)/)
-        def targetBranches = targetMatch ? targetMatch[0][1].split(',').collect { it.trim() } : null
-
-        configs.add([
-            owner: owner,
-            name: name,
-            triggerBranch: triggerBranch,
-            targetBranches: targetBranches
-        ])
-
-        echo "  ${owner}/${name}  trigger=${triggerBranch ?: 'none'}  target=${targetBranches ?: 'none'}"
-    }
-    return configs
+def readYamlConfig() {
+    // Read config.yaml from this repo (checked out by Jenkins or mounted)
+    def yaml = sh(script: '''
+        python3 -c "
+import yaml, json, sys
+with open('config.yaml') as f:
+    print(json.dumps(yaml.safe_load(f)))
+"
+    ''', returnStdout: true).trim()
+    return new groovy.json.JsonSlurper().parseText(yaml)
 }
 
-// --- Clone trigger repos and read their versions ---
-def buildVersionMap(List repoConfigs) {
-    def latestVersions = [:]
+// ===================== PHASE 1: TRIGGER VERSIONS =====================
 
-    for (config in repoConfigs) {
-        if (!config.triggerBranch) continue
+def buildVersionMap(config) {
+    def latestVersions = [:]  // "groupId:artifactId" -> [version, committer]
+
+    for (repo in config.repos) {
+        if (!repo.triggerBranch) continue
 
         try {
-            def workDir = "${WORKSPACE}/trigger-${config.name}"
-            sh "rm -rf ${workDir}"
-            sh "git clone --branch ${config.triggerBranch} --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${config.owner}/${config.name}.git ${workDir}"
+            echo "Reading trigger: ${repo.owner}/${repo.name}:${repo.triggerBranch}"
 
-            def pomFile = "${workDir}/pom.xml"
-            def coords = readPomCoordinates(pomFile)
+            def pomContent = fetchFile(repo.owner, repo.name, repo.pomPath ?: 'pom.xml', repo.triggerBranch)
+            def coords = parsePomCoordinates(pomContent)
+            def committer = getLastCommitter(repo.owner, repo.name, repo.triggerBranch)
 
             if (coords.groupId && coords.artifactId && coords.version) {
-                latestVersions["${coords.groupId}:${coords.artifactId}"] = coords.version
-                echo "  ${coords.groupId}:${coords.artifactId} = ${coords.version} (from ${config.owner}/${config.name}:${config.triggerBranch})"
+                def key = "${coords.groupId}:${coords.artifactId}"
+                latestVersions[key] = [version: coords.version, committer: committer ?: 'unknown']
+                echo "  ${key} = ${coords.version} (by ${committer ?: 'unknown'})"
             }
-
-            sh "rm -rf ${workDir}"
         } catch (Exception e) {
-            echo "Could not read version from ${config.owner}/${config.name}: ${e.message}"
+            echo "WARN: Could not read ${repo.owner}/${repo.name}: ${e.message}"
         }
     }
 
+    echo "Loaded ${latestVersions.size()} trigger versions"
     return latestVersions
 }
 
-// --- Read groupId, artifactId, version from a pom.xml ---
-def readPomCoordinates(String pomFile) {
-    def result = sh(
-        script: """python3 -c "
-import xml.etree.ElementTree as ET
-tree = ET.parse('${pomFile}')
-root = tree.getroot()
-ns = {'m': 'http://maven.apache.org/POM/4.0.0'}
+// ===================== PHASE 2: TARGET BRANCHES =====================
 
-gid = root.find('m:groupId', ns)
-if gid is None:
-    gid = root.find('m:parent/m:groupId', ns)
+def processTargets(config, latestVersions) {
+    def created = 0, skipped = 0, failed = 0
 
-aid = root.find('m:artifactId', ns)
+    for (repo in config.repos) {
+        if (!repo.targetBranches) continue
 
-ver = root.find('m:version', ns)
-if ver is None:
-    ver = root.find('m:parent/m:version', ns)
-
-print(gid.text.strip() if gid is not None else '')
-print(aid.text.strip() if aid is not None else '')
-print(ver.text.strip() if ver is not None else '')
-" """,
-        returnStdout: true
-    ).trim().split('\n')
-
-    return [groupId: result[0], artifactId: result[1], version: result[2]]
-}
-
-// --- Clone a target branch, update deps, create PR ---
-def updateAndPr(Map config, String branch, Map latestVersions) {
-    def workDir = "${WORKSPACE}/target-${config.name}-${branch}"
-    sh "rm -rf ${workDir}"
-    sh "git clone --branch ${branch} --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/${config.owner}/${config.name}.git ${workDir}"
-
-    // Find all pom.xml files
-    def pomFiles = sh(
-        script: "find ${workDir} -name 'pom.xml' -not -path '*/target/*'",
-        returnStdout: true
-    ).trim().split('\n').findAll { it }
-
-    // Update each dependency that has a newer version in the map
-    for (pomFile in pomFiles) {
-        for (entry in latestVersions) {
-            def parts = entry.key.split(':')
-            def depGroupId = parts[0]
-            def depArtifactId = parts[1]
-            def latestVersion = entry.value
-
-            sh """
-                python3 -c "
-import re
-with open('${pomFile}', 'r') as f:
-    content = f.read()
-
-updated = False
-
-# Direct version in dependency block
-pattern = r'(<dependency>\\s*(?:(?!</dependency>).)*<groupId>\\s*${depGroupId}\\s*</groupId>\\s*(?:(?!</dependency>).)*<artifactId>\\s*${depArtifactId}\\s*</artifactId>\\s*(?:(?!</dependency>).)*<version>\\s*)([^<]+)(\\s*</version>)'
-match = re.search(pattern, content, flags=re.DOTALL)
-if match and match.group(2).strip() != '${latestVersion}':
-    content = re.sub(pattern, r'\\g<1>${latestVersion}\\3', content, flags=re.DOTALL)
-    updated = True
-
-# Property-based version
-prop_pattern = r'(<${depArtifactId}\\.version>)([^<]+)(</.*version>)'
-prop_match = re.search(prop_pattern, content)
-if prop_match and prop_match.group(2).strip() != '${latestVersion}':
-    content = re.sub(prop_pattern, r'\\g<1>${latestVersion}\\3', content)
-    updated = True
-
-if updated:
-    with open('${pomFile}', 'w') as f:
-        f.write(content)
-    print('UPDATED')
-else:
-    print('NO_CHANGE')
-"
-            """
+        for (branch in repo.targetBranches) {
+            try {
+                def result = processBranch(repo, branch, latestVersions)
+                if (result > 0) created++
+                else skipped++
+            } catch (Exception e) {
+                echo "ERROR: ${repo.owner}/${repo.name} (${branch.name}): ${e.message}"
+                failed++
+            }
         }
     }
 
-    // Check if any changes were made
-    def hasChanges = sh(
-        script: "cd ${workDir} && git diff --quiet && echo 'clean' || echo 'dirty'",
-        returnStdout: true
-    ).trim()
+    echo "Done. Created: ${created}, Skipped: ${skipped}, Failed: ${failed}"
+}
 
-    if (hasChanges == 'clean') {
-        echo "${config.name} (${branch}): already up to date"
-        sh "rm -rf ${workDir}"
+def processBranch(repo, branch, latestVersions) {
+    def owner = repo.owner
+    def name = repo.name
+    def pomPath = repo.pomPath ?: 'pom.xml'
+    def branchName = branch.name
+
+    echo "Processing ${owner}/${name} on ${branchName}"
+
+    def pomContent = fetchFile(owner, name, pomPath, branchName)
+    def result = findAndUpdateDeps(pomContent, latestVersions)
+
+    if (result.bumps.isEmpty()) {
+        echo "  ${owner}/${name} (${branchName}) is up to date"
         return 0
     }
 
-    // Create branch, commit, push, PR
-    def branchName = "${BRANCH_PREFIX}/${branch}/bump-deps-${System.currentTimeMillis()}"
+    echo "  ${owner}/${name} (${branchName}) needs ${result.bumps.size()} update(s):"
+    for (bump in result.bumps) {
+        echo "    - ${bump.dep} ${bump.oldVer} -> ${bump.newVer} (by @${bump.committer})"
+    }
 
-    sh """
-        cd ${workDir}
-        git checkout -b ${branchName}
-        git add -A
-        git commit -m "chore(deps): update dependencies to latest versions"
-        git push origin ${branchName}
-    """
+    if (branch.autoMerge) {
+        directCommit(owner, name, pomPath, branchName, result.updatedPom, result.bumps)
+    } else {
+        createOrUpdatePr(owner, name, pomPath, branchName, result.updatedPom, result.bumps)
+    }
 
-    sh """
-        curl -s -X POST \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/${config.owner}/${config.name}/pulls \
-            -d '{
-                "title": "chore(deps): update dependencies to latest versions",
-                "body": "## Automated Dependency Update\\n\\nUpdated dependencies to latest versions.\\n\\nCreated by dependency-resolver Jenkins job.",
-                "head": "${branchName}",
-                "base": "${branch}"
-            }'
-    """
-
-    echo "${config.name} (${branch}): PR created"
-    sh "rm -rf ${workDir}"
     return 1
+}
+
+// ===================== POM PARSING + UPDATING =====================
+
+def parsePomCoordinates(pomContent) {
+    def result = sh(script: """
+        python3 -c "
+import xml.etree.ElementTree as ET, sys
+root = ET.fromstring('''${escapePython(pomContent)}''')
+ns = {'m': 'http://maven.apache.org/POM/4.0.0'}
+gid = root.find('m:groupId', ns) or root.find('m:parent/m:groupId', ns)
+aid = root.find('m:artifactId', ns)
+ver = root.find('m:version', ns) or root.find('m:parent/m:version', ns)
+print(gid.text.strip() if gid is not None else '')
+print(aid.text.strip() if aid is not None else '')
+print(ver.text.strip() if ver is not None else '')
+"
+    """, returnStdout: true).trim().split('\n')
+    return [groupId: result[0], artifactId: result[1], version: result[2]]
+}
+
+def findAndUpdateDeps(pomContent, latestVersions) {
+    // Use python to parse deps, check versions, and update pom
+    def latestJson = new groovy.json.JsonBuilder(latestVersions).toString()
+
+    def result = sh(script: """
+        python3 -c "
+import xml.etree.ElementTree as ET, json, re, sys
+
+pom = '''${escapePython(pomContent)}'''
+latest = json.loads('''${latestJson}''')
+
+root = ET.fromstring(pom)
+ns = {'m': 'http://maven.apache.org/POM/4.0.0'}
+
+# Parse properties
+props = {}
+props_el = root.find('m:properties', ns)
+if props_el is not None:
+    for child in props_el:
+        tag = child.tag.replace('{http://maven.apache.org/POM/4.0.0}', '')
+        props[tag] = child.text.strip() if child.text else ''
+
+bumps = []
+updated_pom = pom
+
+def resolve_version(raw):
+    if raw and raw.startswith('\\\${') and raw.endswith('}'):
+        key = raw[2:-1]
+        return props.get(key, raw), key
+    return raw, None
+
+def is_older(current, latest):
+    try:
+        c = [int(x) for x in current.split('-')[0].split('.')]
+        l = [int(x) for x in latest.split('-')[0].split('.')]
+        for i in range(max(len(c), len(l))):
+            cv = c[i] if i < len(c) else 0
+            lv = l[i] if i < len(l) else 0
+            if cv < lv: return True
+            if cv > lv: return False
+        if '-SNAPSHOT' in current and '-SNAPSHOT' not in latest:
+            return True
+    except:
+        pass
+    return False
+
+# Check dependencies and dependencyManagement
+for section in ['m:dependencies', 'm:dependencyManagement/m:dependencies']:
+    deps_el = root.find(section, ns)
+    if deps_el is None: continue
+    for dep in deps_el.findall('m:dependency', ns):
+        gid = dep.find('m:groupId', ns)
+        aid = dep.find('m:artifactId', ns)
+        ver = dep.find('m:version', ns)
+        if gid is None or aid is None or ver is None: continue
+
+        gid_text = gid.text.strip()
+        aid_text = aid.text.strip()
+        raw_ver = ver.text.strip()
+        resolved_ver, prop_key = resolve_version(raw_ver)
+
+        key = f'{gid_text}:{aid_text}'
+        if key not in latest: continue
+
+        latest_ver = latest[key]['version']
+        committer = latest[key]['committer']
+
+        if not is_older(resolved_ver, latest_ver): continue
+
+        # Update pom
+        if prop_key:
+            # Property-based: update <prop_key>old</prop_key>
+            old_tag = f'<{prop_key}>{resolved_ver}</{prop_key}>'
+            new_tag = f'<{prop_key}>{latest_ver}</{prop_key}>'
+            updated_pom = updated_pom.replace(old_tag, new_tag)
+        else:
+            # Direct: find dependency block, replace version
+            pattern = rf'(<dependency>\\s*(?:(?!</dependency>).)*<groupId>\\s*{re.escape(gid_text)}\\s*</groupId>\\s*(?:(?!</dependency>).)*<artifactId>\\s*{re.escape(aid_text)}\\s*</artifactId>\\s*(?:(?!</dependency>).)*<version>\\s*){re.escape(resolved_ver)}(\\s*</version>)'
+            updated_pom = re.sub(pattern, rf'\\g<1>{latest_ver}\\2', updated_pom, flags=re.DOTALL)
+
+        bumps.append({'dep': key, 'oldVer': resolved_ver, 'newVer': latest_ver, 'committer': committer})
+
+# Output as JSON
+output = {'bumps': bumps, 'updatedPom': updated_pom}
+print(json.dumps(output))
+"
+    """, returnStdout: true).trim()
+
+    def parsed = new groovy.json.JsonSlurper().parseText(result)
+    return parsed
+}
+
+// ===================== PR / AUTO-MERGE =====================
+
+def createOrUpdatePr(owner, name, pomPath, targetBranch, updatedPom, bumps) {
+    def branchName = "deps/${targetBranch}/dep-updates"
+
+    // Check if branch exists
+    def branchExists = sh(script: """
+        curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/${owner}/${name}/git/ref/heads/${branchName}"
+    """, returnStdout: true).trim() == '200'
+
+    if (!branchExists) {
+        // Get HEAD SHA and create branch
+        def headSha = sh(script: """
+            curl -s -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                "https://api.github.com/repos/${owner}/${name}/git/ref/heads/${targetBranch}" \
+                | python3 -c "import sys,json; print(json.load(sys.stdin)['object']['sha'])"
+        """, returnStdout: true).trim()
+
+        sh """
+            curl -s -X POST -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                "https://api.github.com/repos/${owner}/${name}/git/refs" \
+                -d '{"ref":"refs/heads/${branchName}","sha":"${headSha}"}'
+        """
+        echo "Created branch ${branchName}"
+    }
+
+    // Get pom SHA from the branch and update
+    commitPom(owner, name, pomPath, branchName, updatedPom, buildCommitMessage(bumps))
+
+    // Find existing PR or create new
+    def existingPr = sh(script: """
+        curl -s -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/${owner}/${name}/pulls?head=${owner}:${branchName}&state=open" \
+            | python3 -c "import sys,json; prs=json.load(sys.stdin); print(prs[0]['number'] if prs else '')"
+    """, returnStdout: true).trim()
+
+    def prBody = buildPrBody(bumps)
+    def prTitle = "chore(deps): automated dependency updates for ${targetBranch}"
+
+    if (existingPr) {
+        sh """
+            curl -s -X PATCH -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                "https://api.github.com/repos/${owner}/${name}/pulls/${existingPr}" \
+                -d '${escapeJson([title: prTitle, body: prBody])}'
+        """
+        echo "Updated PR #${existingPr}"
+    } else {
+        def prUrl = sh(script: """
+            curl -s -X POST -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                "https://api.github.com/repos/${owner}/${name}/pulls" \
+                -d '${escapeJson([title: prTitle, body: prBody, head: branchName, base: targetBranch])}' \
+                | python3 -c "import sys,json; print(json.load(sys.stdin).get('html_url',''))"
+        """, returnStdout: true).trim()
+        echo "Created PR: ${prUrl}"
+    }
+}
+
+def directCommit(owner, name, pomPath, targetBranch, updatedPom, bumps) {
+    def mentions = bumps.collect { "@${it.committer}" }.unique().join(' ')
+    def bumpList = bumps.collect { "- ${it.dep} ${it.oldVer} -> ${it.newVer} (by @${it.committer})" }.join('\n')
+    def message = "chore(deps): auto-update dependencies\n\n${bumpList}\n\ncc ${mentions}"
+
+    commitPom(owner, name, pomPath, targetBranch, updatedPom, message)
+    echo "Auto-merged to ${owner}/${name} (${targetBranch}) — notified: ${mentions}"
+}
+
+// ===================== HELPERS =====================
+
+def fetchFile(owner, repo, path, ref) {
+    return sh(script: """
+        curl -s -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${ref}" \
+            | python3 -c "import sys,json,base64; d=json.load(sys.stdin); print(base64.b64decode(d['content']).decode())"
+    """, returnStdout: true).trim()
+}
+
+def getLastCommitter(owner, repo, branch) {
+    return sh(script: """
+        curl -s -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/${owner}/${repo}/commits/${branch}" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); a=d.get('author',{}); print(a.get('login','unknown') if a else 'unknown')"
+    """, returnStdout: true).trim()
+}
+
+def commitPom(owner, name, pomPath, branch, content, message) {
+    // Get current file SHA
+    def sha = sh(script: """
+        curl -s -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/${owner}/${name}/contents/${pomPath}?ref=${branch}" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['sha'])"
+    """, returnStdout: true).trim()
+
+    // Base64 encode content
+    def encoded = sh(script: "echo '${content.replace("'", "'\\''")}' | base64", returnStdout: true).trim()
+
+    def payload = escapeJson([message: message, content: encoded, sha: sha, branch: branch])
+
+    sh """
+        curl -s -X PUT -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/${owner}/${name}/contents/${pomPath}" \
+            -d '${payload}'
+    """
+}
+
+def buildCommitMessage(bumps) {
+    def lines = bumps.collect { "- ${it.dep} ${it.oldVer} -> ${it.newVer}" }.join('\n')
+    return bumps.size() == 1
+        ? "chore(deps): update ${bumps[0].dep} to ${bumps[0].newVer}"
+        : "chore(deps): update ${bumps.size()} dependencies\n\n${lines}"
+}
+
+def buildPrBody(bumps) {
+    def lines = bumps.collect { "- `${it.dep}` from `${it.oldVer}` to `${it.newVer}` (deployed by @${it.committer})" }.join('\n')
+    return "## Automated Dependency Update\n\n${lines}\n\nThis PR was created automatically by the dependency-resolver."
+}
+
+def escapePython(str) {
+    return str.replace('\\', '\\\\').replace("'", "\\'")
+}
+
+def escapeJson(map) {
+    return new groovy.json.JsonBuilder(map).toString()
 }
