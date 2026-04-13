@@ -1,17 +1,33 @@
 artifacts:
   - groupId: com.myorg
     artifactId: core-lib
-    latestVersion: 6.0.0
+    latestVersion: 3.0.0
     repoOwner: francis007-del-01
     repoName: core-lib
     pomPath: pom.xml
     updatedBy: namin2
     updatedAt: "2026-04-13T00:00:00Z"
   - groupId: com.myorg
-    artifactId: test-service
-    latestVersion: 1.0.0
+    artifactId: utils
+    latestVersion: 2.0.0
     repoOwner: francis007-del-01
-    repoName: test-service
+    repoName: utils
+    pomPath: pom.xml
+    updatedBy: john-doe
+    updatedAt: "2026-04-13T00:00:00Z"
+  - groupId: com.myorg
+    artifactId: test-service-b
+    latestVersion: 2.0.0
+    repoOwner: francis007-del-01
+    repoName: test-service-b
     pomPath: pom.xml
     updatedBy: namin2
+    updatedAt: "2026-04-13T00:00:00Z"
+  - groupId: com.myorg
+    artifactId: test-service-c
+    latestVersion: 1.0.0
+    repoOwner: francis007-del-01
+    repoName: test-service-c
+    pomPath: pom.xml
+    updatedBy: jane-smith
     updatedAt: "2026-04-13T00:00:00Z"
