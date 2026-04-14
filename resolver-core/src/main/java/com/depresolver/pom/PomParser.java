@@ -146,7 +146,7 @@ public class PomParser {
             // Only process direct children of this container
             if (!depEl.getParentNode().equals(container)) continue;
 
-            DependencyInfo info = parseSingleDependency(depEl, properties);
+            DependencyInfo info = parseSingleDependency(depEl, properties, VersionType.DIRECT);
             if (info != null) deps.add(info);
         }
         return deps;
@@ -163,20 +163,20 @@ public class PomParser {
         NodeList depNodes = depsEl.getElementsByTagName("dependency");
         for (int i = 0; i < depNodes.getLength(); i++) {
             Element depEl = (Element) depNodes.item(i);
-            DependencyInfo info = parseSingleDependency(depEl, properties);
+            DependencyInfo info = parseSingleDependency(depEl, properties, VersionType.MANAGED);
             if (info != null) deps.add(info);
         }
         return deps;
     }
 
-    private DependencyInfo parseSingleDependency(Element depEl, Map<String, String> properties) {
+    private DependencyInfo parseSingleDependency(Element depEl, Map<String, String> properties, VersionType defaultType) {
         String gId = getDirectChildText(depEl, "groupId");
         String aId = getDirectChildText(depEl, "artifactId");
         String rawVersion = getDirectChildText(depEl, "version");
 
         if (gId == null || aId == null) return null;
 
-        VersionType type = VersionType.DIRECT;
+        VersionType type = defaultType;
         String propertyKey = null;
         String resolvedVersion = rawVersion;
 
@@ -191,7 +191,7 @@ public class PomParser {
 
     private DependencyInfo parseParent(Element parentEl, Map<String, String> properties) {
         if (parentEl == null) return null;
-        return parseSingleDependency(parentEl, properties);
+        return parseSingleDependency(parentEl, properties, VersionType.PARENT);
     }
 
     private List<DependencyInfo> parsePlugins(Element root, Map<String, String> properties) {
@@ -206,7 +206,7 @@ public class PomParser {
         for (int i = 0; i < pluginNodes.getLength(); i++) {
             Element pluginEl = (Element) pluginNodes.item(i);
             if (!pluginEl.getParentNode().equals(pluginsEl)) continue;
-            DependencyInfo info = parseSingleDependency(pluginEl, properties);
+            DependencyInfo info = parseSingleDependency(pluginEl, properties, VersionType.PLUGIN);
             if (info != null && info.rawVersion() != null) plugins.add(info);
         }
         return plugins;
@@ -227,7 +227,7 @@ public class PomParser {
         for (int i = 0; i < pluginNodes.getLength(); i++) {
             Element pluginEl = (Element) pluginNodes.item(i);
             if (!pluginEl.getParentNode().equals(pluginsEl)) continue;
-            DependencyInfo info = parseSingleDependency(pluginEl, properties);
+            DependencyInfo info = parseSingleDependency(pluginEl, properties, VersionType.PLUGIN);
             if (info != null && info.rawVersion() != null) plugins.add(info);
         }
         return plugins;

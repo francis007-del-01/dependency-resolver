@@ -11,7 +11,7 @@ import com.depresolver.pom.PomParser;
 import com.depresolver.pom.PomParser.DependencyInfo;
 import com.depresolver.pom.PomParser.PomInfo;
 import com.depresolver.scanner.DependencyMatch;
-import com.depresolver.scanner.DependencyMatch.VersionType;
+
 import com.depresolver.version.VersionComparator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -113,11 +113,10 @@ public class ResolverScheduler implements CommandLineRunner {
         String updatedPom = pomContent;
 
         for (DependencyInfo dep : pomInfo.dependencies()) {
-            updatedPom = checkAndBump(dep, dep.versionType(), latestVersions, updatedByMap, repo, updatedPom, bumps);
+            updatedPom = checkAndBump(dep, latestVersions, updatedByMap, repo, updatedPom, bumps);
         }
         for (DependencyInfo dep : pomInfo.managedDependencies()) {
-            VersionType type = dep.versionType() == VersionType.DIRECT ? VersionType.MANAGED : dep.versionType();
-            updatedPom = checkAndBump(dep, type, latestVersions, updatedByMap, repo, updatedPom, bumps);
+            updatedPom = checkAndBump(dep, latestVersions, updatedByMap, repo, updatedPom, bumps);
         }
 
         if (bumps.isEmpty()) {
@@ -139,7 +138,7 @@ public class ResolverScheduler implements CommandLineRunner {
         return 1;
     }
 
-    private String checkAndBump(DependencyInfo dep, VersionType versionType, Map<String, String> latestVersions,
+    private String checkAndBump(DependencyInfo dep, Map<String, String> latestVersions,
                                 Map<String, String> updatedByMap, RepoConfig repo,
                                 String pomContent, List<BumpedDependency> bumps) {
         String key = dep.groupId() + ":" + dep.artifactId();
@@ -154,7 +153,7 @@ public class ResolverScheduler implements CommandLineRunner {
                 .groupId(dep.groupId())
                 .artifactId(dep.artifactId())
                 .currentVersion(dep.resolvedVersion())
-                .versionType(versionType)
+                .versionType(dep.versionType())
                 .propertyKey(dep.propertyKey())
                 .repoOwner(repo.getOwner())
                 .repoName(repo.getName())

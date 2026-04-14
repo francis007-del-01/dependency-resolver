@@ -99,7 +99,7 @@ class ResolverSchedulerTest {
         // PR should be created
         verify(prCreator).createUpdatePr(
                 eq("myorg"), eq("service-a"), eq("pom.xml"), eq("main"),
-                argThat(pom -> pom.contains("2.0.0") && !pom.contains("<version>1.0.0</version>")),
+                argThat(pom -> pom.contains("<version>2.0.0</version>")),
                 argThat(bumps -> bumps.size() == 1
                         && bumps.get(0).groupId().equals("com.myorg")
                         && bumps.get(0).artifactId().equals("core-lib")

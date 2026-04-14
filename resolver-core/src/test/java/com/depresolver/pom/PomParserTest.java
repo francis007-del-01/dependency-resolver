@@ -190,7 +190,7 @@ class PomParserTest {
         assertEquals("com.pool", info.parentDependency().groupId());
         assertEquals("pool-parent", info.parentDependency().artifactId());
         assertEquals("1.0.0", info.parentDependency().resolvedVersion());
-        assertEquals(VersionType.DIRECT, info.parentDependency().versionType());
+        assertEquals(VersionType.PARENT, info.parentDependency().versionType());
     }
 
     @Test
