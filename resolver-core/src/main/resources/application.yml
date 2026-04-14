@@ -3,6 +3,7 @@ github:
 
 resolver:
   branch-prefix: deps
+  parallelism: 10
 
 logging:
   level:

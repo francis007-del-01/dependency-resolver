@@ -1,5 +1,6 @@
 package com.depresolver.github;
 
+import com.depresolver.scanner.DependencyMatch;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -18,7 +19,8 @@ public class PullRequestCreator {
         this.branchPrefix = branchPrefix;
     }
 
-    public record BumpedDependency(String groupId, String artifactId, String oldVersion, String newVersion, String updatedBy) {}
+    public record BumpedDependency(String groupId, String artifactId, String oldVersion, String newVersion,
+                                       String updatedBy, DependencyMatch.VersionType versionType, String propertyKey) {}
 
     public GitHubClient.PrResult createUpdatePr(String owner, String repo, String pomPath, String targetBranch,
                                                   String updatedPomContent,
