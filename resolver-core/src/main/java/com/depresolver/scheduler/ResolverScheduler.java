@@ -134,6 +134,11 @@ public class ResolverScheduler implements CommandLineRunner {
         // Find what needs updating
         List<BumpedDependency> bumps = findBumps(pomInfo.dependencies(), latestVersions, updatedByMap);
         bumps.addAll(findBumps(pomInfo.managedDependencies(), latestVersions, updatedByMap));
+        bumps.addAll(findBumps(pomInfo.plugins(), latestVersions, updatedByMap));
+        bumps.addAll(findBumps(pomInfo.managedPlugins(), latestVersions, updatedByMap));
+        if (pomInfo.parentDependency() != null) {
+            bumps.addAll(findBumps(List.of(pomInfo.parentDependency()), latestVersions, updatedByMap));
+        }
 
         if (bumps.isEmpty()) {
             log.info("{}/{} ({}) is up to date", repo.getOwner(), repo.getName(), branch.getName());
