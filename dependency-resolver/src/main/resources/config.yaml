@@ -1,0 +1,24 @@
+repos:
+  # Trigger repos — read latest version from these
+  - owner: francis007-del-01
+    name: core-lib
+    triggerBranch: main
+
+  - owner: francis007-del-01
+    name: utils
+    triggerBranch: main
+
+  # Consumer repos — update deps on these branches
+  - owner: francis007-del-01
+    name: test-service-b
+    targetBranches:
+      - name: main
+        autoMerge: false
+      - name: develop
+        autoMerge: true
+
+  - owner: francis007-del-01
+    name: test-service-c
+    targetBranches:
+      - name: main
+        autoMerge: false
