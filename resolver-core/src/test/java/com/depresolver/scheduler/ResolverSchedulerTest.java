@@ -39,8 +39,8 @@ class ResolverSchedulerTest {
     @Test
     void skipsReposWithNoTargetBranches() throws Exception {
         var repo = new RepoConfig();
-        repo.setOwner("myorg");
-        repo.setName("core-lib");
+        
+        repo.setUrl("https://github.com/myorg/core-lib");
         repo.setTriggerBranch("master");
         // no targetBranches
 
@@ -63,8 +63,8 @@ class ResolverSchedulerTest {
     void detectsOutdatedDepAndCallsPrCreator() throws Exception {
         // Trigger repo
         var triggerRepo = new RepoConfig();
-        triggerRepo.setOwner("myorg");
-        triggerRepo.setName("core-lib");
+        
+        triggerRepo.setUrl("https://github.com/myorg/core-lib");
         triggerRepo.setTriggerBranch("master");
 
         // Target repo
@@ -73,8 +73,8 @@ class ResolverSchedulerTest {
         branch.setAutoMerge(false);
 
         var targetRepo = new RepoConfig();
-        targetRepo.setOwner("myorg");
-        targetRepo.setName("service-a");
+        
+        targetRepo.setUrl("https://github.com/myorg/service-a");
         targetRepo.setTargetBranches(List.of(branch));
 
         var config = new ResolverConfig();
@@ -112,8 +112,8 @@ class ResolverSchedulerTest {
     @Test
     void autoMergeCallsDirectCommit() throws Exception {
         var triggerRepo = new RepoConfig();
-        triggerRepo.setOwner("myorg");
-        triggerRepo.setName("core-lib");
+        
+        triggerRepo.setUrl("https://github.com/myorg/core-lib");
         triggerRepo.setTriggerBranch("master");
 
         var branch = new BranchConfig();
@@ -121,8 +121,8 @@ class ResolverSchedulerTest {
         branch.setAutoMerge(true);
 
         var targetRepo = new RepoConfig();
-        targetRepo.setOwner("myorg");
-        targetRepo.setName("service-a");
+        
+        targetRepo.setUrl("https://github.com/myorg/service-a");
         targetRepo.setTargetBranches(List.of(branch));
 
         var config = new ResolverConfig();
@@ -152,8 +152,8 @@ class ResolverSchedulerTest {
     @Test
     void skipsUpToDateDeps() throws Exception {
         var triggerRepo = new RepoConfig();
-        triggerRepo.setOwner("myorg");
-        triggerRepo.setName("core-lib");
+        
+        triggerRepo.setUrl("https://github.com/myorg/core-lib");
         triggerRepo.setTriggerBranch("master");
 
         var branch = new BranchConfig();
@@ -161,8 +161,8 @@ class ResolverSchedulerTest {
         branch.setAutoMerge(false);
 
         var targetRepo = new RepoConfig();
-        targetRepo.setOwner("myorg");
-        targetRepo.setName("service-a");
+        
+        targetRepo.setUrl("https://github.com/myorg/service-a");
         targetRepo.setTargetBranches(List.of(branch));
 
         var config = new ResolverConfig();
@@ -189,8 +189,8 @@ class ResolverSchedulerTest {
     @Test
     void noDowngrades() throws Exception {
         var triggerRepo = new RepoConfig();
-        triggerRepo.setOwner("myorg");
-        triggerRepo.setName("core-lib");
+        
+        triggerRepo.setUrl("https://github.com/myorg/core-lib");
         triggerRepo.setTriggerBranch("master");
 
         var branch = new BranchConfig();
@@ -198,8 +198,8 @@ class ResolverSchedulerTest {
         branch.setAutoMerge(false);
 
         var targetRepo = new RepoConfig();
-        targetRepo.setOwner("myorg");
-        targetRepo.setName("service-a");
+        
+        targetRepo.setUrl("https://github.com/myorg/service-a");
         targetRepo.setTargetBranches(List.of(branch));
 
         var config = new ResolverConfig();
