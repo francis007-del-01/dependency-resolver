@@ -52,7 +52,7 @@ class ResolverTest {
         var match = com.depresolver.scanner.DependencyMatch.builder()
                 .groupId("com.pool").artifactId("pool").currentVersion("1.0.0-SNAPSHOT")
                 .versionType(com.depresolver.scanner.DependencyMatch.VersionType.PROPERTY)
-                .propertyKey("pool.version").repoOwner("myorg").repoName("service-c").pomPath("pom.xml")
+                .propertyKey("pool.version")
                 .build();
 
         String updated = pomModifier.updateVersion(serviceCPom, match, "2.0.0");
@@ -100,12 +100,10 @@ class ResolverTest {
         var match1 = com.depresolver.scanner.DependencyMatch.builder()
                 .groupId("com.pool").artifactId("pool").currentVersion("1.0.0")
                 .versionType(com.depresolver.scanner.DependencyMatch.VersionType.DIRECT)
-                .repoOwner("myorg").repoName("multi-dep").pomPath("pom.xml")
                 .build();
         var match2 = com.depresolver.scanner.DependencyMatch.builder()
                 .groupId("com.example").artifactId("service-b").currentVersion("0.9.0")
                 .versionType(com.depresolver.scanner.DependencyMatch.VersionType.DIRECT)
-                .repoOwner("myorg").repoName("multi-dep").pomPath("pom.xml")
                 .build();
 
         String updated = pomModifier.updateVersion(pomContent, match1, "2.0.0");
@@ -146,12 +144,12 @@ class ResolverTest {
         var match1 = com.depresolver.scanner.DependencyMatch.builder()
                 .groupId("com.pool").artifactId("pool-core").currentVersion("1.0.0")
                 .versionType(com.depresolver.scanner.DependencyMatch.VersionType.PROPERTY)
-                .propertyKey("pool.version").repoOwner("myorg").repoName("shared-prop").pomPath("pom.xml")
+                .propertyKey("pool.version")
                 .build();
         var match2 = com.depresolver.scanner.DependencyMatch.builder()
                 .groupId("com.pool").artifactId("pool-api").currentVersion("1.0.0")
                 .versionType(com.depresolver.scanner.DependencyMatch.VersionType.PROPERTY)
-                .propertyKey("pool.version").repoOwner("myorg").repoName("shared-prop").pomPath("pom.xml")
+                .propertyKey("pool.version")
                 .build();
 
         List<String> recordedBumps = new ArrayList<>();

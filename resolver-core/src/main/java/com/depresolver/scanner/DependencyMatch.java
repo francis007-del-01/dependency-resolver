@@ -19,10 +19,5 @@ public class DependencyMatch {
     private String artifactId;
     private String currentVersion;
     private VersionType versionType;
-    private String propertyKey;  // non-null only when versionType == PROPERTY
-
-    // Which repo/pom this match was found in
-    private String repoOwner;
-    private String repoName;
-    private String pomPath;
+    private String propertyKey;
 }

@@ -1,6 +1,5 @@
 package com.depresolver.pom;
 
-import com.depresolver.scanner.DependencyMatch;
 import com.depresolver.scanner.DependencyMatch.VersionType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -77,47 +76,6 @@ public class PomParser {
         } catch (Exception e) {
             throw new RuntimeException("Failed to parse pom.xml", e);
         }
-    }
-
-    public List<DependencyMatch> findDependencyMatches(String xmlContent, String targetGroupId,
-                                                        String targetArtifactId, String repoOwner,
-                                                        String repoName, String pomPath) {
-        PomInfo pomInfo = parse(xmlContent);
-        List<DependencyMatch> matches = new ArrayList<>();
-
-        // Check direct dependencies
-        for (DependencyInfo dep : pomInfo.dependencies()) {
-            if (targetGroupId.equals(dep.groupId()) && targetArtifactId.equals(dep.artifactId())) {
-                matches.add(DependencyMatch.builder()
-                        .groupId(dep.groupId())
-                        .artifactId(dep.artifactId())
-                        .currentVersion(dep.resolvedVersion())
-                        .versionType(dep.versionType())
-                        .propertyKey(dep.propertyKey())
-                        .repoOwner(repoOwner)
-                        .repoName(repoName)
-                        .pomPath(pomPath)
-                        .build());
-            }
-        }
-
-        // Check managed dependencies
-        for (DependencyInfo dep : pomInfo.managedDependencies()) {
-            if (targetGroupId.equals(dep.groupId()) && targetArtifactId.equals(dep.artifactId())) {
-                matches.add(DependencyMatch.builder()
-                        .groupId(dep.groupId())
-                        .artifactId(dep.artifactId())
-                        .currentVersion(dep.resolvedVersion())
-                        .versionType(dep.versionType() == VersionType.DIRECT ? VersionType.MANAGED : dep.versionType())
-                        .propertyKey(dep.propertyKey())
-                        .repoOwner(repoOwner)
-                        .repoName(repoName)
-                        .pomPath(pomPath)
-                        .build());
-            }
-        }
-
-        return matches;
     }
 
     private Map<String, String> parseProperties(Element root) {

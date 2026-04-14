@@ -29,9 +29,6 @@ class PomModifierTest {
                 .artifactId("pool")
                 .currentVersion("1.0.0-SNAPSHOT")
                 .versionType(VersionType.DIRECT)
-                .repoOwner("myorg")
-                .repoName("service-b")
-                .pomPath("pom.xml")
                 .build();
 
         String result = modifier.updateVersion(xml, match, "2.0.0");
@@ -53,9 +50,6 @@ class PomModifierTest {
                 .currentVersion("1.0.0-SNAPSHOT")
                 .versionType(VersionType.PROPERTY)
                 .propertyKey("pool.version")
-                .repoOwner("myorg")
-                .repoName("service-c")
-                .pomPath("pom.xml")
                 .build();
 
         String result = modifier.updateVersion(xml, match, "2.0.0");
@@ -78,9 +72,6 @@ class PomModifierTest {
                 .artifactId("pool")
                 .currentVersion("1.0.0-SNAPSHOT")
                 .versionType(VersionType.MANAGED)
-                .repoOwner("myorg")
-                .repoName("parent")
-                .pomPath("pom.xml")
                 .build();
 
         String result = modifier.updateVersion(xml, match, "2.0.0");
@@ -100,9 +91,6 @@ class PomModifierTest {
                 .artifactId("pool")
                 .currentVersion("1.0.0-SNAPSHOT")
                 .versionType(VersionType.DIRECT)
-                .repoOwner("myorg")
-                .repoName("service-b")
-                .pomPath("pom.xml")
                 .build();
 
         String result = modifier.updateVersion(xml, match, "1.0.0-SNAPSHOT");
@@ -118,9 +106,6 @@ class PomModifierTest {
                 .artifactId("pool")
                 .currentVersion("1.0.0-SNAPSHOT")
                 .versionType(VersionType.DIRECT)
-                .repoOwner("myorg")
-                .repoName("service-b")
-                .pomPath("pom.xml")
                 .build();
 
         String result = modifier.updateVersion(xml, match, "2.0.0");
@@ -157,9 +142,6 @@ class PomModifierTest {
                 .artifactId("pool-parent")
                 .currentVersion("1.0.0")
                 .versionType(VersionType.PARENT)
-                .repoOwner("myorg")
-                .repoName("child")
-                .pomPath("pom.xml")
                 .build();
 
         String result = modifier.updateVersion(xml, match, "2.0.0");
@@ -200,9 +182,6 @@ class PomModifierTest {
                 .artifactId("our-plugin")
                 .currentVersion("1.0.0")
                 .versionType(VersionType.PLUGIN)
-                .repoOwner("myorg")
-                .repoName("with-plugin")
-                .pomPath("pom.xml")
                 .build();
 
         String result = modifier.updateVersion(xml, match, "2.0.0");
@@ -233,9 +212,6 @@ class PomModifierTest {
                 .artifactId("pool-parent")
                 .currentVersion("1.0.0")
                 .versionType(VersionType.PARENT)
-                .repoOwner("myorg")
-                .repoName("child")
-                .pomPath("pom.xml")
                 .build();
 
         String result = modifier.updateVersion(xml, match, "2.0.0");

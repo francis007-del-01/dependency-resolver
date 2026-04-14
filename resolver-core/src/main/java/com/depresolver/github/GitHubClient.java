@@ -13,9 +13,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.Base64;
-import java.util.List;
 
 public class GitHubClient {
 
@@ -48,53 +46,6 @@ public class GitHubClient {
         return new FileContent(content, sha, path);
     }
 
-    public FileContent getFileContentOrNull(String owner, String repo, String path, String ref) {
-        try {
-            return getFileContent(owner, repo, path, ref);
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    public void createOrUpdateFile(String owner, String repo, String path, String content,
-                                   String fileSha, String branch, String commitMessage) throws IOException, InterruptedException {
-        String url = "%s/repos/%s/%s/contents/%s".formatted(API_BASE, owner, repo, path);
-
-        ObjectNode body = MAPPER.createObjectNode();
-        body.put("message", commitMessage);
-        body.put("content", Base64.getEncoder().encodeToString(content.getBytes(StandardCharsets.UTF_8)));
-        body.put("branch", branch);
-        if (fileSha != null) {
-            body.put("sha", fileSha);
-        }
-
-        put(url, body);
-        log.info("Created/updated {} on branch {} in {}/{}", path, branch, owner, repo);
-    }
-
-    public List<String> listDirectories(String owner, String repo, String path, String ref) throws IOException, InterruptedException {
-        String url = "%s/repos/%s/%s/contents/%s?ref=%s".formatted(API_BASE, owner, repo, path, ref);
-        JsonNode node = get(url);
-
-        List<String> dirs = new ArrayList<>();
-        if (node.isArray()) {
-            for (JsonNode entry : node) {
-                if ("dir".equals(entry.get("type").asText())) {
-                    dirs.add(entry.get("name").asText());
-                }
-            }
-        }
-        return dirs;
-    }
-
-    public List<String> listDirectoriesOrEmpty(String owner, String repo, String path, String ref) {
-        try {
-            return listDirectories(owner, repo, path, ref);
-        } catch (Exception e) {
-            return List.of();
-        }
-    }
-
     public void updateFile(String owner, String repo, String path, String content,
                            String fileSha, String branch, String commitMessage) throws IOException, InterruptedException {
         String url = "%s/repos/%s/%s/contents/%s".formatted(API_BASE, owner, repo, path);
@@ -110,13 +61,6 @@ public class GitHubClient {
     }
 
     // --- Branch & PR operations ---
-
-    public String getDefaultBranch(String owner, String repo) throws IOException, InterruptedException {
-        String url = "%s/repos/%s/%s".formatted(API_BASE, owner, repo);
-        JsonNode node = get(url);
-        return node.get("default_branch").asText();
-    }
-
     public String getLastCommitter(String owner, String repo, String branch) {
         try {
             String url = "%s/repos/%s/%s/commits/%s".formatted(API_BASE, owner, repo, branch);
@@ -174,10 +118,6 @@ public class GitHubClient {
         return new PrResult(prNumber, prUrl);
     }
 
-    public boolean pullRequestExists(String owner, String repo, String head) throws IOException, InterruptedException {
-        return findOpenPr(owner, repo, head) != null;
-    }
-
     public PrResult findOpenPr(String owner, String repo, String head) throws IOException, InterruptedException {
         String url = "%s/repos/%s/%s/pulls?head=%s:%s&state=open".formatted(API_BASE, owner, repo, owner, head);
         JsonNode node = get(url);
@@ -195,15 +135,6 @@ public class GitHubClient {
         requestBody.put("body", body);
         patch(url, requestBody);
         log.info("Updated PR #{} in {}/{}", prNumber, owner, repo);
-    }
-
-    public void updateBranchRef(String owner, String repo, String branchName, String newSha) throws IOException, InterruptedException {
-        String url = "%s/repos/%s/%s/git/refs/heads/%s".formatted(API_BASE, owner, repo, branchName);
-        ObjectNode body = MAPPER.createObjectNode();
-        body.put("sha", newSha);
-        body.put("force", true);
-        patch(url, body);
-        log.info("Updated branch {} to {} in {}/{}", branchName, newSha.substring(0, 7), owner, repo);
     }
 
     public record PrResult(int number, String url) {}

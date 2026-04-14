@@ -151,7 +151,7 @@ public class ResolverScheduler implements CommandLineRunner {
         }
 
         // Apply updates to pom
-        String updatedPom = applyBumps(pomContent, bumps, repo);
+        String updatedPom = applyBumps(pomContent, bumps);
 
         if (branch.isAutoMerge()) {
             log.info("Auto-merging to {}/{} ({})", repo.getOwner(), repo.getName(), branch.getName());
@@ -178,7 +178,7 @@ public class ResolverScheduler implements CommandLineRunner {
         return bumps;
     }
 
-    private String applyBumps(String pomContent, List<BumpedDependency> bumps, RepoConfig repo) {
+    private String applyBumps(String pomContent, List<BumpedDependency> bumps) {
         String updatedPom = pomContent;
         for (BumpedDependency bump : bumps) {
             DependencyMatch match = DependencyMatch.builder()
@@ -187,9 +187,6 @@ public class ResolverScheduler implements CommandLineRunner {
                     .currentVersion(bump.oldVersion())
                     .versionType(bump.versionType())
                     .propertyKey(bump.propertyKey())
-                    .repoOwner(repo.getOwner())
-                    .repoName(repo.getName())
-                    .pomPath(repo.getPomPath())
                     .build();
             updatedPom = pomModifier.updateVersion(updatedPom, match, bump.newVersion());
         }
