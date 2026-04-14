@@ -72,12 +72,10 @@ No plugins. No registry. No webhooks. One config file + GitHub API.
 
 ```yaml
 repos:
-  - owner: myorg
-    name: core-lib
+  - url: https://github.com/myorg/core-lib
     triggerBranch: master           # source of truth for version
 
-  - owner: myorg
-    name: my-service
+  - url: https://github.com/myorg/my-service
     targetBranches:
       - name: main
         autoMerge: false            # PR
@@ -85,6 +83,8 @@ repos:
         autoMerge: true             # direct commit
 ```
 
+- **triggerBranch:** fetch pom from this branch → extract version → add to latest versions map
+- **url:** GitHub repo URL — owner and name are derived from it
 - **triggerBranch:** fetch pom from this branch → extract version → add to latest versions map
 - **targetBranches:** fetch pom from each branch → diff against latest → PR or auto-merge
 - A repo can have triggerBranch, targetBranches, or both
@@ -95,8 +95,12 @@ repos:
 
 ### ResolverScheduler
 - Implements `CommandLineRunner` — runs once on startup, then exits
-- Phase 1: builds latest version map from trigger repos
-- Phase 2: processes target repos, delegates to PullRequestCreator
+- **Both phases run in parallel** using `CompletableFuture` with configurable thread pool (default: 10)
+- Phase 1: builds latest version map from trigger repos (parallel per repo)
+- Phase 2: processes target repo+branch pairs (parallel per pair)
+- `findBumps()` — compares dep versions, returns list of what needs updating
+- `applyBumps()` — applies version changes to pom content
+- Updates dependencies, managed dependencies, plugins, managed plugins, and parent version
 - Gets last committer from GitHub API for @mentions
 
 ### PullRequestCreator

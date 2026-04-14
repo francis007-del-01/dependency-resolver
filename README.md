@@ -64,17 +64,14 @@ No plugin. No registry. No `mvn deploy` hook. Just one config file.
 ```yaml
 repos:
   # Libraries — read their latest version from trigger branch
-  - owner: myorg
-    name: core-lib
+  - url: https://github.com/myorg/core-lib
     triggerBranch: master
 
-  - owner: myorg
-    name: utils
+  - url: https://github.com/myorg/utils
     triggerBranch: master
 
   # Services — update their deps on target branches
-  - owner: myorg
-    name: my-service
+  - url: https://github.com/myorg/my-service
     targetBranches:
       - name: main
         autoMerge: false    # creates PR
@@ -82,8 +79,7 @@ repos:
         autoMerge: true     # commits directly
 
   # Library that does both
-  - owner: myorg
-    name: shared-lib
+  - url: https://github.com/myorg/shared-lib
     triggerBranch: master
     targetBranches:
       - name: master
@@ -110,21 +106,20 @@ Or set up Jenkins cron (see `jenkins-shared-lib/Jenkinsfile`).
 
 ```yaml
 repos:
-  - owner: myorg              # GitHub org/user (required)
-    name: core-lib             # GitHub repo name (required)
-    pomPath: pom.xml           # path to pom.xml (default: pom.xml)
-    triggerBranch: master      # read version from this branch (optional)
-    targetBranches:            # update deps on these branches (optional)
+  - url: https://github.com/myorg/core-lib   # GitHub repo URL (required)
+    pomPath: pom.xml                           # path to pom.xml (default: pom.xml)
+    triggerBranch: master                      # read version from this branch (optional)
+    targetBranches:                            # update deps on these branches (optional)
       - name: main
-        autoMerge: false       # false = PR, true = direct commit
+        autoMerge: false                       # false = PR, true = direct commit
       - name: develop
         autoMerge: true
 ```
 
+- **url** — GitHub repo URL. Owner and name are derived from it.
 - **triggerBranch** — the cron reads this repo's pom to get the latest version. Set for libraries that publish versions.
 - **targetBranches** — the cron checks these branches for outdated deps and creates PRs or auto-merges. Set for services/libs that consume dependencies.
 - A repo can have both (library that also consumes other libraries).
-- A repo can have neither (listed for future use).
 
 ## Application Config
 
@@ -135,6 +130,7 @@ github:
 
 resolver:
   branch-prefix: deps
+  parallelism: 10
   config-path: classpath:config.yaml
 ```
 

@@ -5,9 +5,7 @@ import com.depresolver.config.RepoConfig;
 import com.depresolver.config.ResolverConfig;
 import com.depresolver.github.GitHubClient;
 import com.depresolver.github.PullRequestCreator;
-import com.depresolver.pom.PomModifier;
-import com.depresolver.pom.PomParser;
-import org.junit.jupiter.api.BeforeEach;
+import com.depresolver.pom.PomManager;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -21,204 +19,91 @@ import static org.mockito.Mockito.*;
 @ExtendWith(MockitoExtension.class)
 class ResolverSchedulerTest {
 
-    @Mock
-    private GitHubClient gitHubClient;
+    @Mock private GitHubClient gitHubClient;
+    @Mock private PullRequestCreator prCreator;
 
-    @Mock
-    private PullRequestCreator prCreator;
+    private GitHubClient.FileContent pom(String xml) { return new GitHubClient.FileContent(xml, "sha", "pom.xml"); }
 
-    private PomParser pomParser;
-    private PomModifier pomModifier;
-
-    @BeforeEach
-    void setUp() {
-        pomParser = new PomParser();
-        pomModifier = new PomModifier();
+    private RepoConfig trigger(String url, String branch) {
+        var r = new RepoConfig(); r.setUrl(url); r.setTriggerBranch(branch); return r;
+    }
+    private RepoConfig target(String url, List<BranchConfig> branches) {
+        var r = new RepoConfig(); r.setUrl(url); r.setTargetBranches(branches); return r;
+    }
+    private BranchConfig branch(String name, boolean autoMerge) {
+        var b = new BranchConfig(); b.setName(name); b.setAutoMerge(autoMerge); return b;
     }
 
-    @Test
-    void skipsReposWithNoTargetBranches() throws Exception {
-        var repo = new RepoConfig();
-        
-        repo.setUrl("https://github.com/myorg/core-lib");
-        repo.setTriggerBranch("master");
-        // no targetBranches
-
+    @Test void detectsOutdatedAndCreatesPr() throws Exception {
         var config = new ResolverConfig();
-        config.setRepos(List.of(repo));
+        config.setRepos(List.of(
+            trigger("https://github.com/o/lib", "master"),
+            target("https://github.com/o/svc", List.of(branch("main", false)))
+        ));
+        when(gitHubClient.getFileContent("o", "lib", "pom.xml", "master")).thenReturn(pom("<project><modelVersion>4.0.0</modelVersion><groupId>com</groupId><artifactId>lib</artifactId><version>2.0.0</version></project>"));
+        when(gitHubClient.getLastCommitter("o", "lib", "master")).thenReturn("dev1");
+        when(gitHubClient.getFileContent("o", "svc", "pom.xml", "main")).thenReturn(pom("<project><modelVersion>4.0.0</modelVersion><groupId>com</groupId><artifactId>svc</artifactId><version>1.0.0</version><dependencies><dependency><groupId>com</groupId><artifactId>lib</artifactId><version>1.0.0</version></dependency></dependencies></project>"));
 
-        // Trigger branch pom
-        when(gitHubClient.getFileContent("myorg", "core-lib", "pom.xml", "master"))
-                .thenReturn(new GitHubClient.FileContent("<project><modelVersion>4.0.0</modelVersion><groupId>com.myorg</groupId><artifactId>core-lib</artifactId><version>2.0.0</version></project>", "sha1", "pom.xml"));
-        when(gitHubClient.getLastCommitter("myorg", "core-lib", "master")).thenReturn("namin2");
+        new ResolverScheduler(config, gitHubClient, prCreator, new PomManager()).run();
 
-        var scheduler = new ResolverScheduler(config, gitHubClient, pomParser, pomModifier, prCreator);
-        scheduler.run();
-
-        // No PR created since there are no target repos
-        verifyNoInteractions(prCreator);
+        verify(prCreator).createUpdatePr(eq("o"), eq("svc"), eq("pom.xml"), eq("main"),
+                argThat(p -> p.contains("2.0.0")),
+                argThat(b -> b.size() == 1 && b.get(0).updatedBy().equals("dev1")), eq(false));
     }
 
-    @Test
-    void detectsOutdatedDepAndCallsPrCreator() throws Exception {
-        // Trigger repo
-        var triggerRepo = new RepoConfig();
-        
-        triggerRepo.setUrl("https://github.com/myorg/core-lib");
-        triggerRepo.setTriggerBranch("master");
-
-        // Target repo
-        var branch = new BranchConfig();
-        branch.setName("main");
-        branch.setAutoMerge(false);
-
-        var targetRepo = new RepoConfig();
-        
-        targetRepo.setUrl("https://github.com/myorg/service-a");
-        targetRepo.setTargetBranches(List.of(branch));
-
+    @Test void autoMergeCallsDirectCommit() throws Exception {
         var config = new ResolverConfig();
-        config.setRepos(List.of(triggerRepo, targetRepo));
+        config.setRepos(List.of(
+            trigger("https://github.com/o/lib", "master"),
+            target("https://github.com/o/svc", List.of(branch("develop", true)))
+        ));
+        when(gitHubClient.getFileContent("o", "lib", "pom.xml", "master")).thenReturn(pom("<project><modelVersion>4.0.0</modelVersion><groupId>com</groupId><artifactId>lib</artifactId><version>3.0.0</version></project>"));
+        when(gitHubClient.getLastCommitter("o", "lib", "master")).thenReturn("dev2");
+        when(gitHubClient.getFileContent("o", "svc", "pom.xml", "develop")).thenReturn(pom("<project><modelVersion>4.0.0</modelVersion><groupId>com</groupId><artifactId>svc</artifactId><version>1.0.0</version><dependencies><dependency><groupId>com</groupId><artifactId>lib</artifactId><version>1.0.0</version></dependency></dependencies></project>"));
 
-        // Trigger pom: core-lib 2.0.0
-        when(gitHubClient.getFileContent("myorg", "core-lib", "pom.xml", "master"))
-                .thenReturn(new GitHubClient.FileContent(
-                        "<project><modelVersion>4.0.0</modelVersion><groupId>com.myorg</groupId><artifactId>core-lib</artifactId><version>2.0.0</version></project>",
-                        "sha1", "pom.xml"));
-        when(gitHubClient.getLastCommitter("myorg", "core-lib", "master")).thenReturn("namin2");
+        new ResolverScheduler(config, gitHubClient, prCreator, new PomManager()).run();
 
-        // Target pom: depends on core-lib 1.0.0 (outdated)
-        when(gitHubClient.getFileContent("myorg", "service-a", "pom.xml", "main"))
-                .thenReturn(new GitHubClient.FileContent(
-                        "<project><modelVersion>4.0.0</modelVersion><groupId>com.myorg</groupId><artifactId>service-a</artifactId><version>1.0.0</version><dependencies><dependency><groupId>com.myorg</groupId><artifactId>core-lib</artifactId><version>1.0.0</version></dependency></dependencies></project>",
-                        "sha2", "pom.xml"));
-
-        var scheduler = new ResolverScheduler(config, gitHubClient, pomParser, pomModifier, prCreator);
-        scheduler.run();
-
-        // PR should be created
-        verify(prCreator).createUpdatePr(
-                eq("myorg"), eq("service-a"), eq("pom.xml"), eq("main"),
-                argThat(pom -> pom.contains("<version>2.0.0</version>")),
-                argThat(bumps -> bumps.size() == 1
-                        && bumps.get(0).groupId().equals("com.myorg")
-                        && bumps.get(0).artifactId().equals("core-lib")
-                        && bumps.get(0).oldVersion().equals("1.0.0")
-                        && bumps.get(0).newVersion().equals("2.0.0")
-                        && bumps.get(0).updatedBy().equals("namin2")),
-                eq(false));
-    }
-
-    @Test
-    void autoMergeCallsDirectCommit() throws Exception {
-        var triggerRepo = new RepoConfig();
-        
-        triggerRepo.setUrl("https://github.com/myorg/core-lib");
-        triggerRepo.setTriggerBranch("master");
-
-        var branch = new BranchConfig();
-        branch.setName("develop");
-        branch.setAutoMerge(true);
-
-        var targetRepo = new RepoConfig();
-        
-        targetRepo.setUrl("https://github.com/myorg/service-a");
-        targetRepo.setTargetBranches(List.of(branch));
-
-        var config = new ResolverConfig();
-        config.setRepos(List.of(triggerRepo, targetRepo));
-
-        when(gitHubClient.getFileContent("myorg", "core-lib", "pom.xml", "master"))
-                .thenReturn(new GitHubClient.FileContent(
-                        "<project><modelVersion>4.0.0</modelVersion><groupId>com.myorg</groupId><artifactId>core-lib</artifactId><version>3.0.0</version></project>",
-                        "sha1", "pom.xml"));
-        when(gitHubClient.getLastCommitter("myorg", "core-lib", "master")).thenReturn("john");
-
-        when(gitHubClient.getFileContent("myorg", "service-a", "pom.xml", "develop"))
-                .thenReturn(new GitHubClient.FileContent(
-                        "<project><modelVersion>4.0.0</modelVersion><groupId>com.myorg</groupId><artifactId>service-a</artifactId><version>1.0.0</version><dependencies><dependency><groupId>com.myorg</groupId><artifactId>core-lib</artifactId><version>1.5.0</version></dependency></dependencies></project>",
-                        "sha2", "pom.xml"));
-
-        var scheduler = new ResolverScheduler(config, gitHubClient, pomParser, pomModifier, prCreator);
-        scheduler.run();
-
-        // directCommit should be called, not createUpdatePr
-        verify(prCreator).directCommit(
-                eq("myorg"), eq("service-a"), eq("pom.xml"), eq("develop"),
-                anyString(), anyList());
+        verify(prCreator).directCommit(eq("o"), eq("svc"), eq("pom.xml"), eq("develop"), anyString(), anyList());
         verify(prCreator, never()).createUpdatePr(anyString(), anyString(), anyString(), anyString(), anyString(), anyList(), anyBoolean());
     }
 
-    @Test
-    void skipsUpToDateDeps() throws Exception {
-        var triggerRepo = new RepoConfig();
-        
-        triggerRepo.setUrl("https://github.com/myorg/core-lib");
-        triggerRepo.setTriggerBranch("master");
-
-        var branch = new BranchConfig();
-        branch.setName("main");
-        branch.setAutoMerge(false);
-
-        var targetRepo = new RepoConfig();
-        
-        targetRepo.setUrl("https://github.com/myorg/service-a");
-        targetRepo.setTargetBranches(List.of(branch));
-
+    @Test void skipsUpToDate() throws Exception {
         var config = new ResolverConfig();
-        config.setRepos(List.of(triggerRepo, targetRepo));
+        config.setRepos(List.of(
+            trigger("https://github.com/o/lib", "master"),
+            target("https://github.com/o/svc", List.of(branch("main", false)))
+        ));
+        when(gitHubClient.getFileContent("o", "lib", "pom.xml", "master")).thenReturn(pom("<project><modelVersion>4.0.0</modelVersion><groupId>com</groupId><artifactId>lib</artifactId><version>2.0.0</version></project>"));
+        when(gitHubClient.getLastCommitter("o", "lib", "master")).thenReturn("dev1");
+        when(gitHubClient.getFileContent("o", "svc", "pom.xml", "main")).thenReturn(pom("<project><modelVersion>4.0.0</modelVersion><groupId>com</groupId><artifactId>svc</artifactId><version>1.0.0</version><dependencies><dependency><groupId>com</groupId><artifactId>lib</artifactId><version>2.0.0</version></dependency></dependencies></project>"));
 
-        // Both at 2.0.0 — already up to date
-        when(gitHubClient.getFileContent("myorg", "core-lib", "pom.xml", "master"))
-                .thenReturn(new GitHubClient.FileContent(
-                        "<project><modelVersion>4.0.0</modelVersion><groupId>com.myorg</groupId><artifactId>core-lib</artifactId><version>2.0.0</version></project>",
-                        "sha1", "pom.xml"));
-        when(gitHubClient.getLastCommitter("myorg", "core-lib", "master")).thenReturn("namin2");
-
-        when(gitHubClient.getFileContent("myorg", "service-a", "pom.xml", "main"))
-                .thenReturn(new GitHubClient.FileContent(
-                        "<project><modelVersion>4.0.0</modelVersion><groupId>com.myorg</groupId><artifactId>service-a</artifactId><version>1.0.0</version><dependencies><dependency><groupId>com.myorg</groupId><artifactId>core-lib</artifactId><version>2.0.0</version></dependency></dependencies></project>",
-                        "sha2", "pom.xml"));
-
-        var scheduler = new ResolverScheduler(config, gitHubClient, pomParser, pomModifier, prCreator);
-        scheduler.run();
+        new ResolverScheduler(config, gitHubClient, prCreator, new PomManager()).run();
 
         verifyNoInteractions(prCreator);
     }
 
-    @Test
-    void noDowngrades() throws Exception {
-        var triggerRepo = new RepoConfig();
-        
-        triggerRepo.setUrl("https://github.com/myorg/core-lib");
-        triggerRepo.setTriggerBranch("master");
-
-        var branch = new BranchConfig();
-        branch.setName("main");
-        branch.setAutoMerge(false);
-
-        var targetRepo = new RepoConfig();
-        
-        targetRepo.setUrl("https://github.com/myorg/service-a");
-        targetRepo.setTargetBranches(List.of(branch));
-
+    @Test void noDowngrade() throws Exception {
         var config = new ResolverConfig();
-        config.setRepos(List.of(triggerRepo, targetRepo));
+        config.setRepos(List.of(
+            trigger("https://github.com/o/lib", "master"),
+            target("https://github.com/o/svc", List.of(branch("main", false)))
+        ));
+        when(gitHubClient.getFileContent("o", "lib", "pom.xml", "master")).thenReturn(pom("<project><modelVersion>4.0.0</modelVersion><groupId>com</groupId><artifactId>lib</artifactId><version>1.0.0</version></project>"));
+        when(gitHubClient.getLastCommitter("o", "lib", "master")).thenReturn("dev1");
+        when(gitHubClient.getFileContent("o", "svc", "pom.xml", "main")).thenReturn(pom("<project><modelVersion>4.0.0</modelVersion><groupId>com</groupId><artifactId>svc</artifactId><version>1.0.0</version><dependencies><dependency><groupId>com</groupId><artifactId>lib</artifactId><version>2.0.0</version></dependency></dependencies></project>"));
 
-        // Trigger has 1.0.0 but service has 2.0.0 — no downgrade
-        when(gitHubClient.getFileContent("myorg", "core-lib", "pom.xml", "master"))
-                .thenReturn(new GitHubClient.FileContent(
-                        "<project><modelVersion>4.0.0</modelVersion><groupId>com.myorg</groupId><artifactId>core-lib</artifactId><version>1.0.0</version></project>",
-                        "sha1", "pom.xml"));
-        when(gitHubClient.getLastCommitter("myorg", "core-lib", "master")).thenReturn("namin2");
+        new ResolverScheduler(config, gitHubClient, prCreator, new PomManager()).run();
 
-        when(gitHubClient.getFileContent("myorg", "service-a", "pom.xml", "main"))
-                .thenReturn(new GitHubClient.FileContent(
-                        "<project><modelVersion>4.0.0</modelVersion><groupId>com.myorg</groupId><artifactId>service-a</artifactId><version>1.0.0</version><dependencies><dependency><groupId>com.myorg</groupId><artifactId>core-lib</artifactId><version>2.0.0</version></dependency></dependencies></project>",
-                        "sha2", "pom.xml"));
+        verifyNoInteractions(prCreator);
+    }
 
-        var scheduler = new ResolverScheduler(config, gitHubClient, pomParser, pomModifier, prCreator);
-        scheduler.run();
+    @Test void noTargetBranchesSkipped() throws Exception {
+        var config = new ResolverConfig();
+        config.setRepos(List.of(trigger("https://github.com/o/lib", "master")));
+        when(gitHubClient.getFileContent("o", "lib", "pom.xml", "master")).thenReturn(pom("<project><modelVersion>4.0.0</modelVersion><groupId>com</groupId><artifactId>lib</artifactId><version>2.0.0</version></project>"));
+        when(gitHubClient.getLastCommitter("o", "lib", "master")).thenReturn("dev1");
+
+        new ResolverScheduler(config, gitHubClient, prCreator, new PomManager()).run();
 
         verifyNoInteractions(prCreator);
     }

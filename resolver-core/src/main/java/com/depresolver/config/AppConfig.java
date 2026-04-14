@@ -2,8 +2,7 @@ package com.depresolver.config;
 
 import com.depresolver.github.GitHubClient;
 import com.depresolver.github.PullRequestCreator;
-import com.depresolver.pom.PomModifier;
-import com.depresolver.pom.PomParser;
+import com.depresolver.pom.PomManager;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -36,13 +35,8 @@ public class AppConfig {
     }
 
     @Bean
-    public PomParser pomParser() {
-        return new PomParser();
-    }
-
-    @Bean
-    public PomModifier pomModifier() {
-        return new PomModifier();
+    public PomManager pomManager() {
+        return new PomManager();
     }
 
     @Bean

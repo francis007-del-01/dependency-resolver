@@ -6,13 +6,8 @@ import com.depresolver.config.ResolverConfig;
 import com.depresolver.github.GitHubClient;
 import com.depresolver.github.PullRequestCreator;
 import com.depresolver.github.PullRequestCreator.BumpedDependency;
-import com.depresolver.pom.PomModifier;
-import com.depresolver.pom.PomParser;
-import com.depresolver.pom.PomParser.DependencyInfo;
-import com.depresolver.pom.PomParser.PomInfo;
-import com.depresolver.scanner.DependencyMatch;
-
-import com.depresolver.version.VersionComparator;
+import com.depresolver.pom.PomManager;
+import com.depresolver.pom.PomManager.PomCoordinates;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -32,20 +27,18 @@ public class ResolverScheduler implements CommandLineRunner {
 
     private final ResolverConfig resolverConfig;
     private final GitHubClient gitHubClient;
-    private final PomParser pomParser;
-    private final PomModifier pomModifier;
     private final PullRequestCreator prCreator;
+    private final PomManager pomManager;
 
     @Value("${resolver.parallelism:10}")
     private int parallelism = 10;
 
     public ResolverScheduler(ResolverConfig resolverConfig, GitHubClient gitHubClient,
-                             PomParser pomParser, PomModifier pomModifier, PullRequestCreator prCreator) {
+                             PullRequestCreator prCreator, PomManager pomManager) {
         this.resolverConfig = resolverConfig;
         this.gitHubClient = gitHubClient;
-        this.pomParser = pomParser;
-        this.pomModifier = pomModifier;
         this.prCreator = prCreator;
+        this.pomManager = pomManager;
     }
 
     @Override
@@ -64,29 +57,25 @@ public class ResolverScheduler implements CommandLineRunner {
 
                 triggerFutures.add(CompletableFuture.runAsync(() -> {
                     try {
-                        String pomContent = fetchPom(repo.getOwner(), repo.getName(), repo.getPomPath(), repo.getTriggerBranch());
-                        PomInfo pomInfo = pomParser.parse(pomContent);
+                        String pomContent = fetchPom(repo, repo.getTriggerBranch());
+                        PomCoordinates coords = pomManager.readCoordinates(pomContent);
 
-                        if (pomInfo.groupId() != null && pomInfo.artifactId() != null && pomInfo.version() != null) {
-                            String key = pomInfo.groupId() + ":" + pomInfo.artifactId();
-                            latestVersions.put(key, pomInfo.version());
+                        if (coords.groupId() != null && coords.artifactId() != null && coords.version() != null) {
+                            String key = coords.groupId() + ":" + coords.artifactId();
+                            latestVersions.put(key, coords.version());
 
                             String committer = gitHubClient.getLastCommitter(repo.getOwner(), repo.getName(), repo.getTriggerBranch());
-                            if (committer != null) {
-                                updatedByMap.put(key, committer);
-                            }
+                            if (committer != null) updatedByMap.put(key, committer);
 
-                            log.info("  {} = {} (from {}/{}:{}, by {})", key, pomInfo.version(),
-                                    repo.getOwner(), repo.getName(), repo.getTriggerBranch(),
-                                    committer != null ? committer : "unknown");
+                            log.info("  {} = {} (from {}, by {})", key, coords.version(),
+                                    repo.getUrl(), committer != null ? committer : "unknown");
                         }
                     } catch (Exception e) {
-                        log.warn("Could not read trigger version from {}/{}: {}", repo.getOwner(), repo.getName(), e.getMessage());
+                        log.warn("Could not read trigger version from {}: {}", repo.getUrl(), e.getMessage());
                     }
                 }, executor));
             }
 
-            // Wait for all triggers to complete
             CompletableFuture.allOf(triggerFutures.toArray(new CompletableFuture[0])).join();
             log.info("Loaded {} artifact versions from trigger branches", latestVersions.size());
 
@@ -106,16 +95,14 @@ public class ResolverScheduler implements CommandLineRunner {
                             if (result > 0) created.incrementAndGet();
                             else skipped.incrementAndGet();
                         } catch (Exception e) {
-                            log.error("Failed {}/{} ({}): {}", repo.getOwner(), repo.getName(), branch.getName(), e.getMessage());
+                            log.error("Failed {} ({}): {}", repo.getUrl(), branch.getName(), e.getMessage());
                             failed.incrementAndGet();
                         }
                     }, executor));
                 }
             }
 
-            // Wait for all targets to complete
             CompletableFuture.allOf(targetFutures.toArray(new CompletableFuture[0])).join();
-
             log.info("Done. Created: {}, Skipped: {}, Failed: {}", created.get(), skipped.get(), failed.get());
         } catch (Exception e) {
             log.error("Fatal error: {}", e.getMessage(), e);
@@ -126,35 +113,25 @@ public class ResolverScheduler implements CommandLineRunner {
 
     private int processBranch(RepoConfig repo, BranchConfig branch, Map<String, String> latestVersions,
                               Map<String, String> updatedByMap) throws Exception {
-        log.info("Processing {}/{} on branch {}", repo.getOwner(), repo.getName(), branch.getName());
+        log.info("Processing {} on branch {}", repo.getUrl(), branch.getName());
 
-        String pomContent = fetchPom(repo.getOwner(), repo.getName(), repo.getPomPath(), branch.getName());
-        PomInfo pomInfo = pomParser.parse(pomContent);
-
-        // Find what needs updating
-        List<BumpedDependency> bumps = findBumps(pomInfo.dependencies(), latestVersions, updatedByMap);
-        bumps.addAll(findBumps(pomInfo.managedDependencies(), latestVersions, updatedByMap));
-        bumps.addAll(findBumps(pomInfo.plugins(), latestVersions, updatedByMap));
-        bumps.addAll(findBumps(pomInfo.managedPlugins(), latestVersions, updatedByMap));
-        if (pomInfo.parentDependency() != null) {
-            bumps.addAll(findBumps(List.of(pomInfo.parentDependency()), latestVersions, updatedByMap));
-        }
+        String pomContent = fetchPom(repo, branch.getName());
+        List<BumpedDependency> bumps = pomManager.findBumps(pomContent, latestVersions, updatedByMap);
 
         if (bumps.isEmpty()) {
-            log.info("{}/{} ({}) is up to date", repo.getOwner(), repo.getName(), branch.getName());
+            log.info("{} ({}) is up to date", repo.getUrl(), branch.getName());
             return 0;
         }
 
-        log.info("{}/{} ({}) needs {} update(s):", repo.getOwner(), repo.getName(), branch.getName(), bumps.size());
+        log.info("{} ({}) needs {} update(s):", repo.getUrl(), branch.getName(), bumps.size());
         for (BumpedDependency bump : bumps) {
             log.info("  - {}:{} {} -> {}", bump.groupId(), bump.artifactId(), bump.oldVersion(), bump.newVersion());
         }
 
-        // Apply updates to pom
-        String updatedPom = applyBumps(pomContent, bumps);
+        String updatedPom = pomManager.applyBumps(pomContent, bumps);
 
         if (branch.isAutoMerge()) {
-            log.info("Auto-merging to {}/{} ({})", repo.getOwner(), repo.getName(), branch.getName());
+            log.info("Auto-merging to {} ({})", repo.getUrl(), branch.getName());
             prCreator.directCommit(repo.getOwner(), repo.getName(), repo.getPomPath(), branch.getName(), updatedPom, bumps);
         } else {
             prCreator.createUpdatePr(repo.getOwner(), repo.getName(), repo.getPomPath(), branch.getName(), updatedPom, bumps, false);
@@ -162,39 +139,8 @@ public class ResolverScheduler implements CommandLineRunner {
         return 1;
     }
 
-    private List<BumpedDependency> findBumps(List<DependencyInfo> deps, Map<String, String> latestVersions,
-                                              Map<String, String> updatedByMap) {
-        List<BumpedDependency> bumps = new ArrayList<>();
-        for (DependencyInfo dep : deps) {
-            String key = dep.groupId() + ":" + dep.artifactId();
-            String latestVersion = latestVersions.get(key);
-
-            if (latestVersion != null && dep.resolvedVersion() != null
-                    && VersionComparator.isOlderThan(dep.resolvedVersion(), latestVersion)) {
-                String updatedBy = updatedByMap.getOrDefault(key, "unknown");
-                bumps.add(new BumpedDependency(dep.groupId(), dep.artifactId(), dep.resolvedVersion(), latestVersion, updatedBy, dep.versionType(), dep.propertyKey()));
-            }
-        }
-        return bumps;
-    }
-
-    private String applyBumps(String pomContent, List<BumpedDependency> bumps) {
-        String updatedPom = pomContent;
-        for (BumpedDependency bump : bumps) {
-            DependencyMatch match = DependencyMatch.builder()
-                    .groupId(bump.groupId())
-                    .artifactId(bump.artifactId())
-                    .currentVersion(bump.oldVersion())
-                    .versionType(bump.versionType())
-                    .propertyKey(bump.propertyKey())
-                    .build();
-            updatedPom = pomModifier.updateVersion(updatedPom, match, bump.newVersion());
-        }
-        return updatedPom;
-    }
-
-    private String fetchPom(String owner, String repo, String pomPath, String branch) throws Exception {
-        GitHubClient.FileContent file = gitHubClient.getFileContent(owner, repo, pomPath, branch);
+    private String fetchPom(RepoConfig repo, String branch) throws Exception {
+        GitHubClient.FileContent file = gitHubClient.getFileContent(repo.getOwner(), repo.getName(), repo.getPomPath(), branch);
         return file.content();
     }
 }
