@@ -4,6 +4,11 @@ github:
 resolver:
   branch-prefix: deps
   parallelism: 10
+  service-user:
+    names:
+      - root
+    emails:
+      - Tech-t4i-svc-dbill-automation@intuit.com
 
 logging:
   level:

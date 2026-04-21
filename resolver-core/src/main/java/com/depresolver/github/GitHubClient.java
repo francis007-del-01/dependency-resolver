@@ -13,7 +13,11 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class GitHubClient {
 
@@ -58,6 +62,54 @@ public class GitHubClient {
 
         put(url, body);
         log.info("Updated {} on branch {} in {}/{}", path, branch, owner, repo);
+    }
+
+    // --- Tag & commit inspection ---
+
+    public record CommitAuthor(String name, String email, String login) {}
+
+    public List<String> listTags(String owner, String repo) throws IOException, InterruptedException {
+        List<String> tags = new ArrayList<>();
+        String url = "%s/repos/%s/%s/tags?per_page=100".formatted(API_BASE, owner, repo);
+        while (url != null) {
+            HttpResponse<String> response = sendGet(url);
+            JsonNode node = MAPPER.readTree(response.body());
+            if (node.isArray()) {
+                for (JsonNode tag : node) {
+                    JsonNode nameNode = tag.get("name");
+                    if (nameNode != null && !nameNode.isNull()) tags.add(nameNode.asText());
+                }
+            }
+            url = nextLink(response);
+        }
+        return tags;
+    }
+
+    public List<CommitAuthor> compareCommits(String owner, String repo, String base, String head)
+            throws IOException, InterruptedException {
+        String url = "%s/repos/%s/%s/compare/%s...%s".formatted(API_BASE, owner, repo, base, head);
+        JsonNode node = get(url);
+        List<CommitAuthor> authors = new ArrayList<>();
+        JsonNode commits = node.get("commits");
+        if (commits != null && commits.isArray()) {
+            for (JsonNode commit : commits) {
+                String name = null, email = null, login = null;
+                JsonNode commitAuthor = commit.path("commit").path("author");
+                if (!commitAuthor.isMissingNode()) {
+                    JsonNode n = commitAuthor.get("name");
+                    JsonNode e = commitAuthor.get("email");
+                    if (n != null && !n.isNull()) name = n.asText();
+                    if (e != null && !e.isNull()) email = e.asText();
+                }
+                JsonNode ghAuthor = commit.get("author");
+                if (ghAuthor != null && !ghAuthor.isNull()) {
+                    JsonNode l = ghAuthor.get("login");
+                    if (l != null && !l.isNull()) login = l.asText();
+                }
+                authors.add(new CommitAuthor(name, email, login));
+            }
+        }
+        return authors;
     }
 
     // --- Branch & PR operations ---
@@ -142,6 +194,10 @@ public class GitHubClient {
     // --- HTTP helpers ---
 
     private JsonNode get(String url) throws IOException, InterruptedException {
+        return MAPPER.readTree(sendGet(url).body());
+    }
+
+    private HttpResponse<String> sendGet(String url) throws IOException, InterruptedException {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .header("Authorization", "Bearer " + token)
@@ -153,7 +209,16 @@ public class GitHubClient {
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
         checkRateLimit(response);
         checkResponse(response, url);
-        return MAPPER.readTree(response.body());
+        return response;
+    }
+
+    private static final Pattern NEXT_LINK = Pattern.compile("<([^>]+)>;\\s*rel=\"next\"");
+
+    private static String nextLink(HttpResponse<String> response) {
+        String link = response.headers().firstValue("Link").orElse(null);
+        if (link == null) return null;
+        Matcher m = NEXT_LINK.matcher(link);
+        return m.find() ? m.group(1) : null;
     }
 
     private JsonNode post(String url, ObjectNode body) throws IOException, InterruptedException {
