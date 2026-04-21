@@ -3,6 +3,8 @@ package com.depresolver.scheduler;
 import com.depresolver.config.BranchConfig;
 import com.depresolver.config.RepoConfig;
 import com.depresolver.config.ResolverConfig;
+import com.depresolver.config.ServiceUserProperties;
+import com.depresolver.gate.SnapshotGateService;
 import com.depresolver.github.GitHubClient;
 import com.depresolver.github.PullRequestCreator;
 import com.depresolver.pom.PomManager;
@@ -21,6 +23,10 @@ class ResolverSchedulerTest {
 
     @Mock private GitHubClient gitHubClient;
     @Mock private PullRequestCreator prCreator;
+
+    private SnapshotGateService gate() {
+        return new SnapshotGateService(gitHubClient, new ServiceUserProperties());
+    }
 
     private GitHubClient.FileContent pom(String xml) { return new GitHubClient.FileContent(xml, "sha", "pom.xml"); }
 
@@ -44,7 +50,7 @@ class ResolverSchedulerTest {
         when(gitHubClient.getLastCommitter("o", "lib", "master")).thenReturn("dev1");
         when(gitHubClient.getFileContent("o", "svc", "pom.xml", "main")).thenReturn(pom("<project><modelVersion>4.0.0</modelVersion><groupId>com</groupId><artifactId>svc</artifactId><version>1.0.0</version><dependencies><dependency><groupId>com</groupId><artifactId>lib</artifactId><version>1.0.0</version></dependency></dependencies></project>"));
 
-        new ResolverScheduler(config, gitHubClient, prCreator, new PomManager()).run();
+        new ResolverScheduler(config, gitHubClient, prCreator, new PomManager(), gate()).run();
 
         verify(prCreator).createUpdatePr(eq("o"), eq("svc"), eq("pom.xml"), eq("main"),
                 argThat(p -> p.contains("2.0.0")),
@@ -61,7 +67,7 @@ class ResolverSchedulerTest {
         when(gitHubClient.getLastCommitter("o", "lib", "master")).thenReturn("dev2");
         when(gitHubClient.getFileContent("o", "svc", "pom.xml", "develop")).thenReturn(pom("<project><modelVersion>4.0.0</modelVersion><groupId>com</groupId><artifactId>svc</artifactId><version>1.0.0</version><dependencies><dependency><groupId>com</groupId><artifactId>lib</artifactId><version>1.0.0</version></dependency></dependencies></project>"));
 
-        new ResolverScheduler(config, gitHubClient, prCreator, new PomManager()).run();
+        new ResolverScheduler(config, gitHubClient, prCreator, new PomManager(), gate()).run();
 
         verify(prCreator).directCommit(eq("o"), eq("svc"), eq("pom.xml"), eq("develop"), anyString(), anyList());
         verify(prCreator, never()).createUpdatePr(anyString(), anyString(), anyString(), anyString(), anyString(), anyList(), anyBoolean());
@@ -77,7 +83,7 @@ class ResolverSchedulerTest {
         when(gitHubClient.getLastCommitter("o", "lib", "master")).thenReturn("dev1");
         when(gitHubClient.getFileContent("o", "svc", "pom.xml", "main")).thenReturn(pom("<project><modelVersion>4.0.0</modelVersion><groupId>com</groupId><artifactId>svc</artifactId><version>1.0.0</version><dependencies><dependency><groupId>com</groupId><artifactId>lib</artifactId><version>2.0.0</version></dependency></dependencies></project>"));
 
-        new ResolverScheduler(config, gitHubClient, prCreator, new PomManager()).run();
+        new ResolverScheduler(config, gitHubClient, prCreator, new PomManager(), gate()).run();
 
         verifyNoInteractions(prCreator);
     }
@@ -92,7 +98,7 @@ class ResolverSchedulerTest {
         when(gitHubClient.getLastCommitter("o", "lib", "master")).thenReturn("dev1");
         when(gitHubClient.getFileContent("o", "svc", "pom.xml", "main")).thenReturn(pom("<project><modelVersion>4.0.0</modelVersion><groupId>com</groupId><artifactId>svc</artifactId><version>1.0.0</version><dependencies><dependency><groupId>com</groupId><artifactId>lib</artifactId><version>2.0.0</version></dependency></dependencies></project>"));
 
-        new ResolverScheduler(config, gitHubClient, prCreator, new PomManager()).run();
+        new ResolverScheduler(config, gitHubClient, prCreator, new PomManager(), gate()).run();
 
         verifyNoInteractions(prCreator);
     }
@@ -103,7 +109,7 @@ class ResolverSchedulerTest {
         when(gitHubClient.getFileContent("o", "lib", "pom.xml", "master")).thenReturn(pom("<project><modelVersion>4.0.0</modelVersion><groupId>com</groupId><artifactId>lib</artifactId><version>2.0.0</version></project>"));
         when(gitHubClient.getLastCommitter("o", "lib", "master")).thenReturn("dev1");
 
-        new ResolverScheduler(config, gitHubClient, prCreator, new PomManager()).run();
+        new ResolverScheduler(config, gitHubClient, prCreator, new PomManager(), gate()).run();
 
         verifyNoInteractions(prCreator);
     }

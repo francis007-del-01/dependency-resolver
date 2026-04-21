@@ -3,6 +3,7 @@ package com.depresolver.scheduler;
 import com.depresolver.config.BranchConfig;
 import com.depresolver.config.RepoConfig;
 import com.depresolver.config.ResolverConfig;
+import com.depresolver.gate.SnapshotGateService;
 import com.depresolver.github.GitHubClient;
 import com.depresolver.github.PullRequestCreator;
 import com.depresolver.github.PullRequestCreator.BumpedDependency;
@@ -29,16 +30,19 @@ public class ResolverScheduler implements CommandLineRunner {
     private final GitHubClient gitHubClient;
     private final PullRequestCreator prCreator;
     private final PomManager pomManager;
+    private final SnapshotGateService snapshotGate;
 
     @Value("${resolver.parallelism:10}")
     private int parallelism = 10;
 
     public ResolverScheduler(ResolverConfig resolverConfig, GitHubClient gitHubClient,
-                             PullRequestCreator prCreator, PomManager pomManager) {
+                             PullRequestCreator prCreator, PomManager pomManager,
+                             SnapshotGateService snapshotGate) {
         this.resolverConfig = resolverConfig;
         this.gitHubClient = gitHubClient;
         this.prCreator = prCreator;
         this.pomManager = pomManager;
+        this.snapshotGate = snapshotGate;
     }
 
     @Override
@@ -62,13 +66,19 @@ public class ResolverScheduler implements CommandLineRunner {
 
                         if (coords.groupId() != null && coords.artifactId() != null && coords.version() != null) {
                             String key = coords.groupId() + ":" + coords.artifactId();
-                            latestVersions.put(key, coords.version());
+                            String effective = snapshotGate.resolveEffectiveVersion(repo, coords.version());
+                            latestVersions.put(key, effective);
 
                             String committer = gitHubClient.getLastCommitter(repo.getOwner(), repo.getName(), repo.getTriggerBranch());
                             if (committer != null) updatedByMap.put(key, committer);
 
-                            log.info("  {} = {} (from {}, by {})", key, coords.version(),
-                                    repo.getUrl(), committer != null ? committer : "unknown");
+                            if (!effective.equals(coords.version())) {
+                                log.info("  {} = {} (gated from {}, from {}, by {})", key, effective,
+                                        coords.version(), repo.getUrl(), committer != null ? committer : "unknown");
+                            } else {
+                                log.info("  {} = {} (from {}, by {})", key, effective,
+                                        repo.getUrl(), committer != null ? committer : "unknown");
+                            }
                         }
                     } catch (Exception e) {
                         log.warn("Could not read trigger version from {}: {}", repo.getUrl(), e.getMessage());
