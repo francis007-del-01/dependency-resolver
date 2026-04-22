@@ -1,6 +1,5 @@
 package com.depresolver.pom;
 
-import com.depresolver.github.PullRequestCreator.BumpedDependency;
 import com.depresolver.version.VersionComparator;
 import org.apache.maven.model.Dependency;
 import org.apache.maven.model.Model;
@@ -9,16 +8,29 @@ import org.apache.maven.model.Plugin;
 import org.apache.maven.model.io.xpp3.MavenXpp3Reader;
 import org.apache.maven.model.io.xpp3.MavenXpp3Writer;
 
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import java.io.ByteArrayInputStream;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
 
 public class PomManager {
 
     public record PomCoordinates(String groupId, String artifactId, String version) {}
+
+    public record FetchDirective(String groupId, String artifactId) {
+        public String key() { return groupId + ":" + artifactId; }
+    }
+
+    public record FetchDirectives(List<FetchDirective> latest, List<FetchDirective> release) {}
 
     public PomCoordinates readCoordinates(String pomContent) throws Exception {
         Model model = parse(pomContent);
@@ -29,27 +41,46 @@ public class PomManager {
         return new PomCoordinates(groupId, model.getArtifactId(), version);
     }
 
-    public List<BumpedDependency> findBumps(String pomContent, Map<String, String> latestVersions,
-                                             Map<String, String> updatedByMap) throws Exception {
+    public FetchDirectives readFetchDirectives(String pomContent) throws Exception {
+        Document doc = parseXmlDom(pomContent);
+        List<FetchDirective> latest = readDirectiveList(doc, "fetchLatest");
+        List<FetchDirective> release = readDirectiveList(doc, "fetchRelease");
+        return new FetchDirectives(latest, release);
+    }
+
+    private List<FetchDirective> readDirectiveList(Document doc, String wrapperTag) {
+        List<FetchDirective> out = new ArrayList<>();
+        NodeList wrappers = doc.getElementsByTagName(wrapperTag);
+        for (int i = 0; i < wrappers.getLength(); i++) {
+            Element wrapper = (Element) wrappers.item(i);
+            NodeList deps = wrapper.getElementsByTagName("dependency");
+            for (int j = 0; j < deps.getLength(); j++) {
+                Element dep = (Element) deps.item(j);
+                String g = textOfChild(dep, "groupId");
+                String a = textOfChild(dep, "artifactId");
+                if (g != null && a != null) out.add(new FetchDirective(g.trim(), a.trim()));
+            }
+        }
+        return out;
+    }
+
+    public List<BumpedDependency> findBumpsFromDirectives(String pomContent,
+                                                         Map<String, String> latestVersions,
+                                                         Map<String, String> updatedByMap) throws Exception {
         Model model = parse(pomContent);
         Properties props = model.getProperties();
         List<BumpedDependency> bumps = new ArrayList<>();
 
-        // Direct dependencies
         for (Dependency dep : model.getDependencies()) {
             checkDep(dep.getGroupId(), dep.getArtifactId(), resolveVersion(dep.getVersion(), props),
                     latestVersions, updatedByMap, bumps);
         }
-
-        // Managed dependencies
         if (model.getDependencyManagement() != null) {
             for (Dependency dep : model.getDependencyManagement().getDependencies()) {
                 checkDep(dep.getGroupId(), dep.getArtifactId(), resolveVersion(dep.getVersion(), props),
                         latestVersions, updatedByMap, bumps);
             }
         }
-
-        // Plugins
         if (model.getBuild() != null) {
             for (Plugin plugin : model.getBuild().getPlugins()) {
                 checkDep(plugin.getGroupId(), plugin.getArtifactId(), resolveVersion(plugin.getVersion(), props),
@@ -62,14 +93,11 @@ public class PomManager {
                 }
             }
         }
-
-        // Parent
         Parent parent = model.getParent();
         if (parent != null) {
             checkDep(parent.getGroupId(), parent.getArtifactId(), parent.getVersion(),
                     latestVersions, updatedByMap, bumps);
         }
-
         return bumps;
     }
 
@@ -78,45 +106,29 @@ public class PomManager {
         Properties props = model.getProperties();
 
         for (BumpedDependency bump : bumps) {
-            String key = bump.groupId() + ":" + bump.artifactId();
-
-            // Update dependencies
             for (Dependency dep : model.getDependencies()) {
-                if (matches(dep, bump)) {
-                    setVersion(dep, bump.newVersion(), props);
-                }
+                if (matches(dep, bump)) setVersion(dep, bump.newVersion(), props);
             }
             if (model.getDependencyManagement() != null) {
                 for (Dependency dep : model.getDependencyManagement().getDependencies()) {
-                    if (matches(dep, bump)) {
-                        setVersion(dep, bump.newVersion(), props);
-                    }
+                    if (matches(dep, bump)) setVersion(dep, bump.newVersion(), props);
                 }
             }
-
-            // Update plugins
             if (model.getBuild() != null) {
                 for (Plugin plugin : model.getBuild().getPlugins()) {
-                    if (matchesPlugin(plugin, bump)) {
-                        setPluginVersion(plugin, bump.newVersion(), props);
-                    }
+                    if (matchesPlugin(plugin, bump)) setPluginVersion(plugin, bump.newVersion(), props);
                 }
                 if (model.getBuild().getPluginManagement() != null) {
                     for (Plugin plugin : model.getBuild().getPluginManagement().getPlugins()) {
-                        if (matchesPlugin(plugin, bump)) {
-                            setPluginVersion(plugin, bump.newVersion(), props);
-                        }
+                        if (matchesPlugin(plugin, bump)) setPluginVersion(plugin, bump.newVersion(), props);
                     }
                 }
             }
-
-            // Update parent
             if (model.getParent() != null && bump.groupId().equals(model.getParent().getGroupId())
                     && bump.artifactId().equals(model.getParent().getArtifactId())) {
                 model.getParent().setVersion(bump.newVersion());
             }
         }
-
         return serialize(model);
     }
 
@@ -180,5 +192,20 @@ public class PomManager {
         StringWriter writer = new StringWriter();
         new MavenXpp3Writer().write(writer, model);
         return writer.toString();
+    }
+
+    private static Document parseXmlDom(String xml) throws Exception {
+        DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
+        dbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        dbf.setFeature("http://xml.org/sax/features/external-general-entities", false);
+        dbf.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+        DocumentBuilder db = dbf.newDocumentBuilder();
+        return db.parse(new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private static String textOfChild(Element parent, String tag) {
+        NodeList children = parent.getElementsByTagName(tag);
+        if (children.getLength() == 0) return null;
+        return children.item(0).getTextContent();
     }
 }

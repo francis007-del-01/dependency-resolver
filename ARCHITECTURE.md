@@ -1,169 +1,111 @@
-# Dependency Resolver - Architecture
+# Dependency Resolver — Architecture
 
 ## Overview
 
-A Spring Boot application that automatically updates Maven dependency versions across GitHub repositories. Reads a config file to know which repos to watch, fetches poms via GitHub API, and creates PRs or auto-merges when dependencies are outdated.
-
-No plugins. No registry. No webhooks. One config file + GitHub API.
-
----
+A one-shot CLI that updates a single target repo's pom dependencies. Invoked by Jenkins per-(owner, repo, branch). No central config, no cron, no gating heuristics — Artifactory is the authority on "what versions exist."
 
 ## Flow
 
 ```
-                        CONFIG-BASED RESOLUTION FLOW
-                        ============================
-
-  +-------------------+
-  | config.yaml       |
-  | (in this repo)    |
-  +-------------------+
-          |
-          v
-  +-------------------+
-  | ResolverScheduler |
-  | (Spring Boot)     |
-  +-------------------+
-          |
-          |  Phase 1: Read trigger versions
-          |
-          v
-  +-------------------------------+
-  | For each repo with            |
-  | triggerBranch:                 |
-  |   GET /repos/{o}/{r}/contents |
-  |   /pom.xml?ref={branch}       |
-  |   → parse groupId:artifactId  |
-  |     :version                  |
-  |   → get last committer        |
-  +-------------------------------+
-          |
-          |  latestVersions map:
-          |    com.myorg:core-lib → 3.0.0 (by @namin2)
-          |    com.myorg:utils → 2.0.0 (by @john-doe)
-          |
-          |  Phase 2: Update target branches
-          |
-          v
-  +-------------------------------+
-  | For each repo with            |
-  | targetBranches:               |
-  |   For each branch:            |
-  |     Fetch pom from branch     |
-  |     Parse deps                |
-  |     Compare (semver)          |
-  |     If outdated:              |
-  +-------------------------------+
-         |                |
-    autoMerge=false  autoMerge=true
-         |                |
-         v                v
-  +-----------+    +-----------+
-  | Create/   |    | Commit    |
-  | update PR |    | directly  |
-  | with      |    | with      |
-  | @mentions |    | @mentions |
-  +-----------+    +-----------+
+  Jenkins (params: OWNER, REPO, BRANCH)
+         │
+         ▼
+  +-----------------------------+
+  | ResolverRunner              |
+  | (ApplicationRunner)         |
+  +-----------------------------+
+         │
+         │ 1. GitHubClient.getFileContent(pom)
+         ▼
+  +-----------------------------+
+  | PomManager.readFetchDirec-  |
+  | tives(pomContent)           |
+  |   → <fetchLatest> deps      |
+  |   → <fetchRelease> deps     |
+  +-----------------------------+
+         │
+         │ 2. For each directive:
+         ▼
+  +-----------------------------+
+  | ArtifactoryClient           |
+  |  fetchLatest  →             |
+  |    latestReleaseVersion +   |
+  |    latestSnapshotBaseVersion|
+  |    → download both jars →   |
+  |    compare git.commit.id    |
+  |    (same SHA = use release; |
+  |     different = use SNAPSHOT)|
+  |  fetchRelease → latestReleaseVersion(g, a)
+  +-----------------------------+
+         │
+         │ 3. Build latestVersions map
+         ▼
+  +-----------------------------+
+  | PomManager.findBumpsFromDi- |
+  | rectives → List<Bumped...>  |
+  | (scans deps, depMgmt,       |
+  |  plugins, parent, properties)|
+  +-----------------------------+
+         │
+         │ 4. Apply bumps in-place
+         ▼
+  +-----------------------------+
+  | PomManager.applyBumps       |
+  |   (format-preserving; uses  |
+  |    Maven model + property   |
+  |    resolution)              |
+  +-----------------------------+
+         │
+         │ 5. Commit directly to BRANCH
+         ▼
+  +-----------------------------+
+  | GitHubClient.updateFile     |
+  +-----------------------------+
 ```
 
----
+## Key files
 
-## Config
+| File | Role |
+|---|---|
+| `runner/ResolverRunner.java` | CLI entry; `ApplicationRunner` that parses `--owner/--repo/--branch/--pomPath`, orchestrates the flow. |
+| `pom/PomManager.java` | Parses `<fetchLatest>/<fetchRelease>` directives; finds and applies version bumps (direct, property, managed, plugins, parent). |
+| `pom/BumpedDependency.java` | Result record: `(groupId, artifactId, oldVersion, newVersion, updatedBy)`. |
+| `artifactory/ArtifactoryClient.java` | `latestReleaseVersion(g, a)` + `latestSnapshotBaseVersion(g, a)` (from `maven-metadata.xml`); jar fetchers `getReleaseGitInfo(g, a, v)` / `getSnapshotGitInfo(g, a, baseVersion)` extract `git.commit.id`; `getReleaseScm(g, a, v)` extracts the library's GitHub `owner/name` from the release jar's embedded pom. Caches raw jar bytes, git info, and SCM by `(g:a:version)` forever — timestamped SNAPSHOT versions are immutable, releases never move. XXE-hardened. |
+| `artifactory/GitPropertiesExtractor.java` | Streams a jar's zip entries to pull `git.commit.id` + `git.dirty` from `META-INF/git.properties`. |
+| `artifactory/JarScmExtractor.java` | Streams a jar's zip entries to find `META-INF/maven/<g>/<a>/pom.xml`, parses `<scm>` (url / connection / developerConnection), matches a GitHub URL pattern (github.com + GHE hosts + SSH form) to extract `owner/name`. |
+| `config/ServiceUserProperties.java` | Bot-author list from `application.yml`. Matches name + email case-insensitively. |
+| `artifactory/ArtifactoryProperties.java` | Spring `@ConfigurationProperties` for `base-url`, `release-repo`, `snapshot-repo`, `token`. |
+| `github/GitHubClient.java` | File read/write via Contents API. |
+| `version/VersionComparator.java` | Semver-aware "is older than" used by the bump check. |
+| `config/AppConfig.java` | Bean wiring. |
 
-```yaml
-repos:
-  - url: https://github.com/myorg/core-lib
-    triggerBranch: master           # source of truth for version
+## Custom pom directives
 
-  - url: https://github.com/myorg/my-service
-    targetBranches:
-      - name: main
-        autoMerge: false            # PR
-      - name: develop
-        autoMerge: true             # direct commit
+Maven silently ignores unknown top-level elements under `<project>`, so `<fetchLatest>` and `<fetchRelease>` are safe to include in a normal pom. They're never consumed by Maven itself — only by this resolver.
+
+```xml
+<fetchLatest>
+  <dependency>
+    <groupId>...</groupId>
+    <artifactId>...</artifactId>
+  </dependency>
+</fetchLatest>
 ```
 
-- **triggerBranch:** fetch pom from this branch → extract version → add to latest versions map
-- **url:** GitHub repo URL — owner and name are derived from it
-- **triggerBranch:** fetch pom from this branch → extract version → add to latest versions map
-- **targetBranches:** fetch pom from each branch → diff against latest → PR or auto-merge
-- A repo can have triggerBranch, targetBranches, or both
+Only `<groupId>` and `<artifactId>` are read. `<version>` (if present) is ignored — the resolver pulls the current version from where the dep actually lives in the pom (`<dependencies>`, `<dependencyManagement>`, `<plugins>`, `<parent>`, or a `<properties>` property ref).
 
----
+## What this design deliberately drops
 
-## Components
+- **Cron** — nothing schedules itself. Jenkins (or any caller) decides when + where.
+- **Central config.yaml** — no list of repos, branches, or service users.
+- **Branch-based gating** — no more "scan master/develop for human commits since the tag." The gate uses two signals: `git.commit.id` equality between the release and SNAPSHOT jars (shortcut: same SHA → same source → use release), and, when SHAs differ, GitHub `compare releaseSha...snapshotSha` with a service-user filter (zero human commits → use release; else → use SNAPSHOT). The library's GitHub repo is discovered at runtime from the release jar's embedded `<scm>`.
+- **PR creation** — commits directly to the target branch. If a repo wants PR-based review, that's a Jenkinsfile concern (commit to a feature branch and open a PR there).
+- **@mentions / committer tracking** — unnecessary when the caller already knows who triggered the job.
 
-### ResolverScheduler
-- Implements `CommandLineRunner` — runs once on startup, then exits
-- **Both phases run in parallel** using `CompletableFuture` with configurable thread pool (default: 10)
-- Phase 1: builds latest version map from trigger repos (parallel per repo)
-- Phase 2: processes target repo+branch pairs (parallel per pair)
-- `findBumps()` — compares dep versions, returns list of what needs updating
-- `applyBumps()` — applies version changes to pom content
-- Updates dependencies, managed dependencies, plugins, managed plugins, and parent version
-- Gets last committer from GitHub API for @mentions
+## Fallback when `git.properties` is missing
 
-### PullRequestCreator
-- **createUpdatePr():** stable branch name `deps/{target}/dep-updates`, creates or updates existing PR
-- **directCommit():** commits pom update directly to target branch with @mentions in commit message
-- Batches multiple dep bumps into one PR/commit
+If either the release or SNAPSHOT jar lacks `META-INF/git.properties` (library hasn't adopted `git-commit-id-maven-plugin`), the resolver can't compare SHAs. It falls back to preferring the SNAPSHOT and logs a WARN. Same for `git.dirty=true` — we can't trust a SHA from a dirty build.
 
-### PomParser
-- DOM-based XML parsing with XXE protection
-- Handles direct versions, property references (`${prop}`), managed dependencies
-- Inherits groupId/version from parent pom
+## Build & run
 
-### PomModifier
-- Format-preserving version updates using indexOf (no regex, no DOM serialization)
-- Handles direct, property, and managed version types
-- Only the version value changes — whitespace, comments, structure preserved
-
-### VersionComparator
-- Semantic version comparison: `1.9.0 < 1.10.0` (numeric, not string)
-- SNAPSHOT is older than release: `1.0.0-SNAPSHOT < 1.0.0`
-- Never downgrades: `2.0.0` → `1.5.0` is skipped
-
-### GitHubClient
-- GitHub REST API: file read/write, branches, PRs, directory listing
-- 409 conflict handling for concurrent writes
-- Rate limit monitoring
-- Last committer lookup for @mentions
-
----
-
-## PR Behavior
-
-| Scenario | What happens |
-|----------|-------------|
-| First run, deps outdated | Creates branch + PR |
-| Second run, new version | Updates existing PR (new commit + updated body) |
-| Multiple deps outdated | Batched into one PR |
-| autoMerge=true | Direct commit to branch, @mention deployers |
-| Already up to date | Skipped |
-| Newer than latest | Skipped (no downgrades) |
-
-PR branch name: `deps/{targetBranch}/dep-updates` (stable, reused across bumps)
-
----
-
-## Version Detection
-
-| Style | Example | How PomParser detects it | How PomModifier updates it |
-|-------|---------|------------------------|---------------------------|
-| Direct | `<version>1.0.0</version>` | Literal string | Replace within `<dependency>` block |
-| Property | `<version>${lib.version}</version>` | Matches `${...}` pattern | Update `<lib.version>` in `<properties>` |
-| Managed | Version in `<dependencyManagement>` | Found under that section | Same as direct |
-
----
-
-## Safeguards
-
-| Safeguard | How |
-|-----------|-----|
-| No downgrades | Semantic version comparison |
-| XXE protection | DOM parser disables external entities |
-| Format preservation | indexOf-based replacement, no DOM serialization |
-| Idempotent | Stable branch name, reuses existing PR |
-| Rate limit aware | Monitors X-RateLimit-Remaining header |
-| Error resilient | Per-repo failures don't stop others |
-| @mentions | Deployers notified via GitHub @mention in PR/commit |
+See `README.md`.

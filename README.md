@@ -1,213 +1,164 @@
 # Dependency Resolver
 
-Automatically keeps Maven dependency versions up to date across repositories by creating pull requests or auto-merging.
-
-## High-Level Design
-
-```
-+------------------+          +------------------------------------------+
-|  Trigger Repos   |          |  This Repo (dependency-resolver)         |
-|  (libraries)     |          |                                          |
-|  +-----------+   |          |  +------------------------------------+  |
-|  | core-lib  |   |  GitHub  |  | config.yaml                        |  |
-|  | (v3.0.0)  |---+--API---->|  |   trigger repos + target repos     |  |
-|  +-----------+   |          |  |   per-branch autoMerge config       |  |
-|  +-----------+   |          |  +------------------------------------+  |
-|  | utils     |   |          |                  |                       |
-|  | (v2.0.0)  |---+--------->|                  | Jenkins cron          |
-|  +-----------+   |          |                  v                       |
-+------------------+          |  +------------------------------------+  |
-                              |  | CronResolverMain (Spring Boot)     |  |
-+------------------+          |  |                                    |  |
-|  Target Repos    |          |  | 1. Read config.yaml                |  |
-|  (services)      |          |  | 2. Fetch pom from trigger branches |  |
-|       ^          |          |  |    → build latest versions map     |  |
-|       |          |          |  | 3. Fetch pom from target branches  |  |
-|  +-----------+   |          |  |    → diff deps against latest      |  |
-|  | service-b |<--+--PR/-----+  | 4. autoMerge=true → direct commit |  |
-|  +-----------+   |  merge   |  |    autoMerge=false → create PR     |  |
-|  +-----------+   |          |  +------------------------------------+  |
-|  | service-c |<--+----------+                                          |
-|  +-----------+   |          +------------------------------------------+
-+------------------+
-```
+A per-repo CLI tool that updates Maven dependency versions on a target branch. Invoked by Jenkins with `(owner, repo, branch)`; the target repo's own `pom.xml` declares which dependencies to track by embedding `<fetchLatest>` and `<fetchRelease>` elements.
 
 ## How It Works
 
 ```
-Jenkins cron (every 10 min)
-  |
-  +-- Read config.yaml
-  |
-  +-- For each trigger repo:
-  |     Fetch pom.xml from trigger branch via GitHub API
-  |     Read groupId:artifactId:version
-  |     Read last committer (for @mentions)
-  |     → Build latest versions map
-  |
-  +-- For each target repo, for each branch:
-  |     Fetch pom.xml from that branch via GitHub API
-  |     Parse dependencies (direct, property, managed)
-  |     Compare against latest versions (semver, no downgrades)
-  |     If outdated:
-  |       autoMerge=true  → commit directly, @mention deployers
-  |       autoMerge=false → create/update PR with deployer info
-  +-- Done
+Jenkins job (parameterized: OWNER, REPO, BRANCH)
+  │
+  ▼
+java -jar resolver-core.jar --owner=... --repo=... --branch=... [--pomPath=pom.xml]
+  │
+  ├── Fetch pom.xml from GitHub (owner/repo @ branch)
+  │
+  ├── Parse <fetchLatest> and <fetchRelease> directives
+  │     <fetchLatest>
+  │       <dependency><groupId>...</groupId><artifactId>...</artifactId></dependency>
+  │       ...
+  │     </fetchLatest>
+  │     <fetchRelease>
+  │       <dependency>...</dependency>
+  │     </fetchRelease>
+  │
+  ├── For each fetchLatest dep  → Artifactory snapshot repo → latest SNAPSHOT base version
+  ├── For each fetchRelease dep → Artifactory release repo  → latest release version
+  │
+  ├── Diff against the pom's current versions (deps, depMgmt, plugins, parent)
+  │
+  └── If anything outdated: apply bumps → commit directly to BRANCH
 ```
 
-No plugin. No registry. No `mvn deploy` hook. Just one config file.
+No cron, no central config, no SNAPSHOT gating heuristics. Each target repo declares what it wants; Artifactory is the authority on "what exists."
 
-## Quick Start
+## Example: target pom.xml
 
-### 1. Create config.yaml
+```xml
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>my-service</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.intuit.payment.common</groupId>
+      <artifactId>pymt-lib</artifactId>
+      <version>1.0.443.0</version>
+    </dependency>
+    <dependency>
+      <groupId>com.intuit.payment</groupId>
+      <artifactId>pymt-schema</artifactId>
+      <version>2.1.0</version>
+    </dependency>
+  </dependencies>
+
+  <!-- Custom directives read by the resolver. Maven ignores unknown elements. -->
+  <fetchLatest>
+    <dependency>
+      <groupId>com.intuit.payment.common</groupId>
+      <artifactId>pymt-lib</artifactId>
+    </dependency>
+  </fetchLatest>
+  <fetchRelease>
+    <dependency>
+      <groupId>com.intuit.payment</groupId>
+      <artifactId>pymt-schema</artifactId>
+    </dependency>
+  </fetchRelease>
+</project>
+```
+
+When the Jenkins job runs against this repo:
+
+- `pymt-lib` (fetchLatest) → resolver asks Artifactory for the latest SNAPSHOT (`1.0.444.0-SNAPSHOT`) and the latest release (`1.0.443.0`), then downloads both jars and compares the `git.commit.id` each jar carries in `META-INF/git.properties`. If the SHAs match → source hasn't moved → use release. If they differ → resolver reads the library's `<scm>` from the release jar's embedded pom, calls GitHub `compare releaseSha...snapshotSha` for that repo, and filters out service-user commits. **Zero human commits between the two → use release** (SNAPSHOT only has bot noise); **one or more human commits → use SNAPSHOT** (real changes).
+- `pymt-schema` (fetchRelease) → resolver asks Artifactory for the latest release → `2.2.0` → pom gets bumped to `2.2.0`. No SNAPSHOT involvement.
+- Commit pushed directly to `BRANCH`.
+
+### SHA comparison for `fetchLatest`
+
+For the SHA comparison to work, libraries listed under `fetchLatest` must publish `META-INF/git.properties` inside their jar (via `git-commit-id-maven-plugin`). Add to the library's root pom:
+
+```xml
+<plugin>
+  <groupId>io.github.git-commit-id</groupId>
+  <artifactId>git-commit-id-maven-plugin</artifactId>
+  <version>9.0.1</version>
+  <executions>
+    <execution>
+      <goals><goal>revision</goal></goals>
+      <phase>initialize</phase>
+    </execution>
+  </executions>
+  <configuration>
+    <includeOnlyProperties>
+      <property>git.commit.id</property>
+      <property>git.dirty</property>
+    </includeOnlyProperties>
+    <failOnNoGitDirectory>false</failOnNoGitDirectory>
+  </configuration>
+</plugin>
+```
+
+**Fallback when `git.properties` is missing** (library hasn't adopted the plugin yet): the resolver prefers the SNAPSHOT version. Safe default — downstream consumers see the pom-declared SNAPSHOT and can decide what to do with it. A WARN is logged so you know which library still needs the plugin.
+
+**Fallback when `<scm>` is missing** from the release jar's embedded pom: the resolver can't reach out to GitHub to classify commits as human vs. bot. It prefers the SNAPSHOT (conservative) and logs a WARN. To enable bot filtering, ensure the library's root pom declares `<scm><url>` or `<scm><connection>` pointing at the GitHub repo.
+
+**Service-user list** in `application.yml`:
 
 ```yaml
-repos:
-  # Libraries — read their latest version from trigger branch
-  - url: https://github.com/myorg/core-lib
-    triggerBranch: master
-
-  - url: https://github.com/myorg/utils
-    triggerBranch: master
-
-  # Services — update their deps on target branches
-  - url: https://github.com/myorg/my-service
-    targetBranches:
-      - name: main
-        autoMerge: false    # creates PR
-      - name: develop
-        autoMerge: true     # commits directly
-
-  # Library that does both
-  - url: https://github.com/myorg/shared-lib
-    triggerBranch: master
-    targetBranches:
-      - name: master
-        autoMerge: false
-      - name: develop
-        autoMerge: true
-```
-
-### 2. Set GitHub token
-
-```bash
-export GITHUB_TOKEN=ghp_your_token_here
-```
-
-### 3. Run
-
-```bash
-java -jar resolver-core.jar
-```
-
-Or set up Jenkins cron (see `jenkins-shared-lib/Jenkinsfile`).
-
-## Config Reference
-
-```yaml
-repos:
-  - url: https://github.com/myorg/core-lib   # GitHub repo URL (required)
-    pomPath: pom.xml                           # path to pom.xml (default: pom.xml)
-    triggerBranch: master                      # read version from this branch (optional)
-    targetBranches:                            # update deps on these branches (optional)
-      - name: main
-        autoMerge: false                       # false = PR, true = direct commit
-      - name: develop
-        autoMerge: true
-```
-
-- **url** — GitHub repo URL. Owner and name are derived from it.
-- **triggerBranch** — the cron reads this repo's pom to get the latest version. Set for libraries that publish versions.
-- **targetBranches** — the cron checks these branches for outdated deps and creates PRs or auto-merges. Set for services/libs that consume dependencies.
-- A repo can have both (library that also consumes other libraries).
-
-## Application Config
-
-`application.yml`:
-```yaml
-github:
-  token: ${GITHUB_TOKEN}
-
 resolver:
-  branch-prefix: deps
-  parallelism: 10
-  config-path: classpath:config.yaml
+  service-user:
+    names:
+      - root
+    emails:
+      - Tech-t4i-svc-dbill-automation@intuit.com
 ```
 
-## What happens on each run
+Any commit whose author name or email matches (case-insensitive) is treated as a bot.
 
-| Trigger repo | What the cron does |
+## Environment
+
+Required env vars (set as Jenkins credentials):
+
+| Var | Purpose |
 |---|---|
-| `core-lib` (triggerBranch: master) | Fetches `pom.xml` from `core-lib/master`, reads version `3.0.0`, notes last committer `@namin2` |
+| `GITHUB_TOKEN` | Fetch + commit pom via GitHub API |
+| `ARTIFACTORY_TOKEN` | Fetch `maven-metadata.xml` from Artifactory |
+| `ARTIFACTORY_BASE_URL` | e.g. `https://artifactory.a.intuit.com/artifactory` |
+| `ARTIFACTORY_RELEASE_REPO` | e.g. `maven.billingcomm-custpayment.ngp-releases` |
+| `ARTIFACTORY_SNAPSHOT_REPO` | e.g. `maven.billingcomm-custpayment.ngp-snapshots` |
 
-| Target repo | Branch | autoMerge | What the cron does |
-|---|---|---|---|
-| `service-b` | main | false | Fetches pom, finds `core-lib 1.5.0` → outdated → creates PR with `@namin2` in body |
-| `service-b` | develop | true | Fetches pom, finds `core-lib 1.8.0` → outdated → commits directly, `@namin2` in commit message |
-| `service-c` | main | false | Fetches pom, finds `${core-lib.version}=1.3.0` → outdated → creates PR, property updated |
+## CLI arguments
 
-## PR Behavior
-
-- **Stable branch name:** `deps/{targetBranch}/dep-updates` — no version in name
-- **First run:** creates branch + PR
-- **Second run (new version):** updates the same PR (new commit + updated body)
-- **Multiple deps outdated:** batched into one PR
-- **autoMerge:** commits directly to target branch, @mentions all deployers
-
-### PR body example:
-```
-## Automated Dependency Update
-
-- `com.myorg:core-lib` from `1.5.0` to `3.0.0` (deployed by @namin2)
-- `com.myorg:utils` from `1.2.0` to `2.0.0` (deployed by @john-doe)
-
-This PR was created automatically by the dependency-resolver.
-```
-
-## Project Structure
-
-```
-dependency-resolver/
-  pom.xml                                    # Parent POM
-  resolver-core/                             # Spring Boot app
-    src/main/resources/
-      config.yaml                            # Repo configuration
-      application.yml                        # App settings
-    src/main/java/com/depresolver/
-      ResolverApplication.java               # Spring Boot entry
-      config/
-        AppConfig.java                       # Bean definitions
-        ResolverConfig.java                  # Config root model
-        RepoConfig.java                      # Per-repo config
-        BranchConfig.java                    # Per-branch config
-      scheduler/
-        ResolverScheduler.java               # Main logic (CommandLineRunner)
-      github/
-        GitHubClient.java                    # GitHub REST API
-        PullRequestCreator.java              # PR create/update + direct commit
-      pom/
-        PomParser.java                       # DOM-based XML parsing
-        PomModifier.java                     # Format-preserving version updates
-        PropertyResolver.java                # ${property} resolution
-      version/
-        VersionComparator.java               # Semantic version comparison
-      scanner/
-        DependencyMatch.java                 # Version match DTO
-  jenkins-shared-lib/
-    Jenkinsfile                              # Jenkins cron pipeline
-```
+| Flag | Required | Default |
+|---|---|---|
+| `--owner` | yes | — |
+| `--repo` | yes | — |
+| `--branch` | yes | — |
+| `--pomPath` | no | `pom.xml` |
 
 ## Build
 
 ```bash
-# Build
-mvn clean package -pl resolver-core -DskipTests
+mvn -pl resolver-core clean package
+```
 
-# Run tests
-mvn clean test -pl resolver-core
+Produces `resolver-core/target/resolver-core-1.0.0-SNAPSHOT.jar`.
 
-# Run locally
-GITHUB_TOKEN=your_token java -jar resolver-core/target/resolver-core-1.0.0-SNAPSHOT.jar
+## Run locally
+
+```bash
+export GITHUB_TOKEN=...
+export ARTIFACTORY_TOKEN=...
+export ARTIFACTORY_BASE_URL=https://artifactory.a.intuit.com/artifactory
+export ARTIFACTORY_RELEASE_REPO=maven.billingcomm-custpayment.ngp-releases
+export ARTIFACTORY_SNAPSHOT_REPO=maven.billingcomm-custpayment.ngp-snapshots
+
+java -jar resolver-core/target/resolver-core-1.0.0-SNAPSHOT.jar \
+  --owner=myorg \
+  --repo=my-service \
+  --branch=develop
 ```
 
 Requires Java 21+.

@@ -1,9 +1,13 @@
 github:
   token: ${GITHUB_TOKEN}
 
+artifactory:
+  base-url: ${ARTIFACTORY_BASE_URL:}
+  release-repo: ${ARTIFACTORY_RELEASE_REPO:}
+  snapshot-repo: ${ARTIFACTORY_SNAPSHOT_REPO:}
+  token: ${ARTIFACTORY_TOKEN:}
+
 resolver:
-  branch-prefix: deps
-  parallelism: 10
   service-user:
     names:
       - root

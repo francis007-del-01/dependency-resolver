@@ -1,332 +1,50 @@
-import groovy.json.JsonSlurper
-import groovy.json.JsonBuilder
-
 pipeline {
     agent any
 
-    triggers {
-        cron('H/10 * * * *')
+    parameters {
+        string(name: 'OWNER', description: 'GitHub repo owner (org)', defaultValue: '')
+        string(name: 'REPO',  description: 'GitHub repo name',       defaultValue: '')
+        string(name: 'BRANCH', description: 'Target branch to update', defaultValue: '')
+        string(name: 'POM_PATH', description: 'Path to pom.xml within the repo', defaultValue: 'pom.xml')
     }
 
     options {
-        timeout(time: 15, unit: 'MINUTES')
+        timeout(time: 10, unit: 'MINUTES')
         disableConcurrentBuilds()
     }
 
     stages {
-        stage('Resolve Dependencies') {
+        stage('Validate Inputs') {
             steps {
-                withCredentials([string(credentialsId: 'github-api-token', variable: 'GH_TOKEN')]) {
-                    script {
-                        def config = readConfig()
-                        def versions = readTriggerVersions(config)
-                        updateTargets(config, versions)
+                script {
+                    if (!params.OWNER?.trim() || !params.REPO?.trim() || !params.BRANCH?.trim()) {
+                        error "OWNER, REPO, and BRANCH parameters are all required."
                     }
+                    echo "Resolving dependencies for ${params.OWNER}/${params.REPO}@${params.BRANCH}"
+                }
+            }
+        }
+
+        stage('Run Resolver') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'github-api-token',   variable: 'GITHUB_TOKEN'),
+                    string(credentialsId: 'artifactory-token',  variable: 'ARTIFACTORY_TOKEN'),
+                ]) {
+                    sh '''
+                        java -jar /opt/resolver-core.jar \
+                            --owner="${OWNER}" \
+                            --repo="${REPO}" \
+                            --branch="${BRANCH}" \
+                            --pomPath="${POM_PATH}"
+                    '''
                 }
             }
         }
     }
 
     post {
-        failure { echo "Dependency resolver failed." }
-        success { echo "Dependency resolver completed." }
+        failure { echo "Dependency resolver failed for ${params.OWNER}/${params.REPO}@${params.BRANCH}" }
+        success { echo "Dependency resolver completed for ${params.OWNER}/${params.REPO}@${params.BRANCH}" }
     }
-}
-
-// ===================== CONFIG =====================
-
-def readConfig() {
-    def configPath = '/var/jenkins_home/project/resolver-core/src/main/resources/config.yaml'
-    def json = sh(script: "python3 -c \"import yaml,json; print(json.dumps(yaml.safe_load(open('${configPath}'))))\"",
-                  returnStdout: true).trim()
-    return toSerializable(new JsonSlurper().parseText(json))
-}
-
-def toSerializable(obj) {
-    if (obj instanceof Map) {
-        def result = new HashMap()
-        obj.each { k, v -> result[k] = toSerializable(v) }
-        return result
-    } else if (obj instanceof List) {
-        return obj.collect { toSerializable(it) }
-    }
-    return obj
-}
-
-// ===================== PHASE 1: TRIGGER VERSIONS =====================
-
-def readTriggerVersions(config) {
-    def versions = new HashMap()
-
-    for (repo in config.repos) {
-        if (!repo.triggerBranch) continue
-
-        try {
-            echo "Reading trigger: ${repo.owner}/${repo.name}:${repo.triggerBranch}"
-
-            def pomContent = ghFetchFile(repo.owner, repo.name, repo.pomPath ?: 'pom.xml', repo.triggerBranch)
-            def coords = parsePomCoords(pomContent)
-            def committer = ghGetCommitter(repo.owner, repo.name, repo.triggerBranch)
-
-            if (coords.groupId && coords.artifactId && coords.version) {
-                def key = "${coords.groupId}:${coords.artifactId}"
-                versions[key] = new HashMap([version: coords.version, committer: committer ?: 'unknown'])
-                echo "  ${key} = ${coords.version} (by ${committer ?: 'unknown'})"
-            }
-        } catch (Exception e) {
-            echo "WARN: Could not read ${repo.owner}/${repo.name}: ${e.message}"
-        }
-    }
-
-    echo "Loaded ${versions.size()} trigger versions"
-    return versions
-}
-
-// ===================== PHASE 2: TARGET BRANCHES =====================
-
-def updateTargets(config, versions) {
-    def created = 0
-    def skipped = 0
-    def failed = 0
-
-    for (repo in config.repos) {
-        if (!repo.targetBranches) continue
-
-        for (branch in repo.targetBranches) {
-            try {
-                def result = processBranch(repo, branch, versions)
-                if (result > 0) { created++ } else { skipped++ }
-            } catch (Exception e) {
-                echo "ERROR: ${repo.owner}/${repo.name} (${branch.name}): ${e.message}"
-                failed++
-            }
-        }
-    }
-
-    echo "Done. Created: ${created}, Skipped: ${skipped}, Failed: ${failed}"
-}
-
-def processBranch(repo, branch, versions) {
-    def owner = repo.owner
-    def name = repo.name
-    def pomPath = repo.pomPath ?: 'pom.xml'
-
-    echo "Processing ${owner}/${name} on ${branch.name}"
-
-    def pomContent = ghFetchFile(owner, name, pomPath, branch.name)
-    def updateResult = findAndUpdate(pomContent, versions)
-
-    if (updateResult.bumps.isEmpty()) {
-        echo "  ${owner}/${name} (${branch.name}) is up to date"
-        return 0
-    }
-
-    echo "  ${owner}/${name} (${branch.name}) needs ${updateResult.bumps.size()} update(s):"
-    for (bump in updateResult.bumps) {
-        echo "    - ${bump.dep} ${bump.oldVer} -> ${bump.newVer} (by @${bump.committer})"
-    }
-
-    if (branch.autoMerge) {
-        doDirectCommit(owner, name, pomPath, branch.name, updateResult.updatedPom, updateResult.bumps)
-    } else {
-        doCreateOrUpdatePr(owner, name, pomPath, branch.name, updateResult.updatedPom, updateResult.bumps)
-    }
-
-    return 1
-}
-
-// ===================== POM PARSING + UPDATING =====================
-
-def parsePomCoords(pomContent) {
-    writeFile file: '/tmp/pom_to_parse.xml', text: pomContent
-    def result = sh(script: '''
-        python3 -c "
-import xml.etree.ElementTree as ET
-root = ET.parse('/tmp/pom_to_parse.xml').getroot()
-ns = {'m': 'http://maven.apache.org/POM/4.0.0'}
-gid = root.find('m:groupId', ns) or root.find('m:parent/m:groupId', ns)
-aid = root.find('m:artifactId', ns)
-ver = root.find('m:version', ns) or root.find('m:parent/m:version', ns)
-print(gid.text.strip() if gid is not None else '')
-print(aid.text.strip() if aid is not None else '')
-print(ver.text.strip() if ver is not None else '')
-"
-    ''', returnStdout: true).trim().split('\n')
-    return new HashMap([groupId: result[0], artifactId: result[1], version: result[2]])
-}
-
-def findAndUpdate(pomContent, versions) {
-    writeFile file: '/tmp/pom_to_update.xml', text: pomContent
-    writeFile file: '/tmp/versions.json', text: new JsonBuilder(versions).toString()
-
-    def result = sh(script: '''
-        python3 -c "
-import xml.etree.ElementTree as ET, json, re
-
-with open('/tmp/pom_to_update.xml') as f:
-    pom = f.read()
-with open('/tmp/versions.json') as f:
-    latest = json.load(f)
-
-root = ET.fromstring(pom)
-ns = {'m': 'http://maven.apache.org/POM/4.0.0'}
-
-props = {}
-props_el = root.find('m:properties', ns)
-if props_el is not None:
-    for child in props_el:
-        tag = child.tag.replace('{http://maven.apache.org/POM/4.0.0}', '')
-        props[tag] = child.text.strip() if child.text else ''
-
-bumps = []
-updated = pom
-
-def resolve(raw):
-    if raw and raw.startswith(chr(36)+chr(123)) and raw.endswith(chr(125)):
-        key = raw[2:-1]
-        return props.get(key, raw), key
-    return raw, None
-
-def older(cur, lat):
-    try:
-        c = [int(x) for x in cur.split('-')[0].split('.')]
-        l = [int(x) for x in lat.split('-')[0].split('.')]
-        for i in range(max(len(c), len(l))):
-            cv = c[i] if i < len(c) else 0
-            lv = l[i] if i < len(l) else 0
-            if cv < lv: return True
-            if cv > lv: return False
-        return '-SNAPSHOT' in cur and '-SNAPSHOT' not in lat
-    except: return False
-
-for sec in ['m:dependencies', 'm:dependencyManagement/m:dependencies']:
-    el = root.find(sec, ns)
-    if el is None: continue
-    for dep in el.findall('m:dependency', ns):
-        g = dep.find('m:groupId', ns)
-        a = dep.find('m:artifactId', ns)
-        v = dep.find('m:version', ns)
-        if g is None or a is None or v is None: continue
-        gt, at, rv = g.text.strip(), a.text.strip(), v.text.strip()
-        res, pk = resolve(rv)
-        key = f'{gt}:{at}'
-        if key not in latest: continue
-        lv = latest[key]['version']
-        cm = latest[key]['committer']
-        if not older(res, lv): continue
-        if pk:
-            updated = updated.replace(f'<{pk}>{res}</{pk}>', f'<{pk}>{lv}</{pk}>')
-        else:
-            pat = rf'(<dependency>\\s*(?:(?!</dependency>).)*<groupId>\\s*{re.escape(gt)}\\s*</groupId>\\s*(?:(?!</dependency>).)*<artifactId>\\s*{re.escape(at)}\\s*</artifactId>\\s*(?:(?!</dependency>).)*<version>\\s*){re.escape(res)}(\\s*</version>)'
-            updated = re.sub(pat, rf'\\g<1>{lv}\\2', updated, flags=re.DOTALL)
-        bumps.append({'dep': key, 'oldVer': res, 'newVer': lv, 'committer': cm})
-
-print(json.dumps({'bumps': bumps, 'updatedPom': updated}))
-"
-    ''', returnStdout: true).trim()
-
-    return toSerializable(new JsonSlurper().parseText(result))
-}
-
-// ===================== PR / AUTO-MERGE =====================
-
-def doCreateOrUpdatePr(owner, name, pomPath, targetBranch, updatedPom, bumps) {
-    def branchName = "deps/${targetBranch}/dep-updates"
-
-    def branchCode = ghApi("repos/${owner}/${name}/git/ref/heads/${branchName}", 'GET', null, true)
-    if (branchCode != '200') {
-        def headSha = ghApiJson("repos/${owner}/${name}/git/ref/heads/${targetBranch}")
-        headSha = sh(script: "echo '${headSha}' | python3 -c \"import sys,json; print(json.load(sys.stdin)['object']['sha'])\"", returnStdout: true).trim()
-        writeFile file: '/tmp/create_branch.json', text: new JsonBuilder([ref: "refs/heads/${branchName}", sha: headSha]).toString()
-        ghApi("repos/${owner}/${name}/git/refs", 'POST', '@/tmp/create_branch.json', false)
-        echo "Created branch ${branchName}"
-    }
-
-    ghCommitFile(owner, name, pomPath, branchName, updatedPom, buildCommitMsg(bumps))
-
-    def prJson = ghApiJson("repos/${owner}/${name}/pulls?head=${owner}:${branchName}&state=open")
-    def prNum = sh(script: "echo '${prJson}' | python3 -c \"import sys,json; prs=json.load(sys.stdin); print(prs[0]['number'] if prs else '')\"", returnStdout: true).trim()
-
-    def prTitle = "chore(deps): automated dependency updates for ${targetBranch}"
-    def prBody = buildPrBody(bumps)
-
-    if (prNum) {
-        writeFile file: '/tmp/update_pr.json', text: new JsonBuilder([title: prTitle, body: prBody]).toString()
-        ghApi("repos/${owner}/${name}/pulls/${prNum}", 'PATCH', '@/tmp/update_pr.json', false)
-        echo "Updated PR #${prNum}"
-    } else {
-        writeFile file: '/tmp/create_pr.json', text: new JsonBuilder([title: prTitle, body: prBody, head: branchName, base: targetBranch]).toString()
-        def prUrl = ghApiJson("repos/${owner}/${name}/pulls", 'POST', '@/tmp/create_pr.json')
-        prUrl = sh(script: "echo '${prUrl}' | python3 -c \"import sys,json; print(json.load(sys.stdin).get('html_url',''))\"", returnStdout: true).trim()
-        echo "Created PR: ${prUrl}"
-    }
-}
-
-def doDirectCommit(owner, name, pomPath, targetBranch, updatedPom, bumps) {
-    def mentions = bumps.collect { "@${it.committer}" }.unique().join(' ')
-    def bumpList = bumps.collect { "- ${it.dep} ${it.oldVer} -> ${it.newVer} (by @${it.committer})" }.join('\n')
-    def message = "chore(deps): auto-update dependencies\n\n${bumpList}\n\ncc ${mentions}"
-
-    ghCommitFile(owner, name, pomPath, targetBranch, updatedPom, message)
-    echo "Auto-merged to ${owner}/${name} (${targetBranch}) — notified: ${mentions}"
-}
-
-// ===================== GITHUB API HELPERS =====================
-
-def ghApi(path, method = 'GET', data = null, returnCode = false) {
-    def dataArg = data ? "-d ${data}" : ''
-    def methodArg = method != 'GET' ? "-X ${method}" : ''
-    def wFlag = returnCode ? "-o /dev/null -w '%{http_code}'" : ''
-    def script = "#!/bin/sh\ncurl -s ${wFlag} ${methodArg} -H \"Authorization: Bearer \${GH_TOKEN}\" 'https://api.github.com/${path}' ${dataArg}"
-    writeFile file: '/tmp/gh_api.sh', text: script
-    return sh(script: 'sh /tmp/gh_api.sh', returnStdout: true).trim()
-}
-
-def ghApiJson(path, method = 'GET', data = null) {
-    def dataArg = data ? "-d ${data}" : ''
-    def methodArg = method != 'GET' ? "-X ${method}" : ''
-    def script = "#!/bin/sh\ncurl -s ${methodArg} -H \"Authorization: Bearer \${GH_TOKEN}\" 'https://api.github.com/${path}' ${dataArg}"
-    writeFile file: '/tmp/gh_curl.sh', text: script
-    return sh(script: 'sh /tmp/gh_curl.sh', returnStdout: true).trim()
-}
-
-def ghFetchFile(owner, repo, path, ref) {
-    def json = ghApiJson("repos/${owner}/${repo}/contents/${path}?ref=${ref}")
-    writeFile file: '/tmp/gh_response.json', text: json
-    echo "DEBUG ghFetchFile response length: ${json.length()}, starts with: ${json.take(100)}"
-    return sh(script: 'python3 -c "import json,base64; d=json.load(open(\'/tmp/gh_response.json\')); print(base64.b64decode(d[\'content\']).decode())"',
-              returnStdout: true).trim()
-}
-
-def ghGetCommitter(owner, repo, branch) {
-    def json = ghApiJson("repos/${owner}/${repo}/commits/${branch}")
-    writeFile file: '/tmp/gh_commit.json', text: json
-    return sh(script: '''python3 -c "import json; d=json.load(open('/tmp/gh_commit.json')); a=d.get('author',{}); print(a.get('login','unknown') if a else 'unknown')"''',
-              returnStdout: true).trim()
-}
-
-def ghCommitFile(owner, name, pomPath, branch, content, message) {
-    def json = ghApiJson("repos/${owner}/${name}/contents/${pomPath}?ref=${branch}")
-    writeFile file: '/tmp/gh_file.json', text: json
-    def sha = sh(script: '''python3 -c "import json; print(json.load(open('/tmp/gh_file.json'))['sha'])"''',
-                 returnStdout: true).trim()
-
-    writeFile file: '/tmp/pom_content.txt', text: content
-    def encoded = sh(script: "base64 /tmp/pom_content.txt | tr -d '\\n'", returnStdout: true).trim()
-
-    writeFile file: '/tmp/commit.json', text: new JsonBuilder([message: message, content: encoded, sha: sha, branch: branch]).toString()
-    ghApi("repos/${owner}/${name}/contents/${pomPath}", 'PUT', '@/tmp/commit.json', false)
-}
-
-// ===================== FORMATTING =====================
-
-def buildCommitMsg(bumps) {
-    if (bumps.size() == 1) return "chore(deps): update ${bumps[0].dep} to ${bumps[0].newVer}"
-    def lines = bumps.collect { "- ${it.dep} ${it.oldVer} -> ${it.newVer}" }.join('\n')
-    return "chore(deps): update ${bumps.size()} dependencies\n\n${lines}"
-}
-
-def buildPrBody(bumps) {
-    def lines = bumps.collect { "- `${it.dep}` from `${it.oldVer}` to `${it.newVer}` (deployed by @${it.committer})" }.join('\n')
-    return "## Automated Dependency Update\n\n${lines}\n\nThis PR was created automatically by the dependency-resolver."
 }
