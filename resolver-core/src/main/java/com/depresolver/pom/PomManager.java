@@ -6,13 +6,11 @@ import org.apache.maven.model.Model;
 import org.apache.maven.model.Parent;
 import org.apache.maven.model.Plugin;
 import org.apache.maven.model.io.xpp3.MavenXpp3Reader;
-import org.apache.maven.model.io.xpp3.MavenXpp3Writer;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.ByteArrayInputStream;
 import java.io.StringReader;
-import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -102,34 +100,114 @@ public class PomManager {
     }
 
     public String applyBumps(String pomContent, List<BumpedDependency> bumps) throws Exception {
-        Model model = parse(pomContent);
-        Properties props = model.getProperties();
+        Document doc = parseXmlDom(pomContent);
+        Map<String, String> properties = readProperties(doc);
+        String updated = pomContent;
 
         for (BumpedDependency bump : bumps) {
-            for (Dependency dep : model.getDependencies()) {
-                if (matches(dep, bump)) setVersion(dep, bump.newVersion(), props);
-            }
-            if (model.getDependencyManagement() != null) {
-                for (Dependency dep : model.getDependencyManagement().getDependencies()) {
-                    if (matches(dep, bump)) setVersion(dep, bump.newVersion(), props);
-                }
-            }
-            if (model.getBuild() != null) {
-                for (Plugin plugin : model.getBuild().getPlugins()) {
-                    if (matchesPlugin(plugin, bump)) setPluginVersion(plugin, bump.newVersion(), props);
-                }
-                if (model.getBuild().getPluginManagement() != null) {
-                    for (Plugin plugin : model.getBuild().getPluginManagement().getPlugins()) {
-                        if (matchesPlugin(plugin, bump)) setPluginVersion(plugin, bump.newVersion(), props);
+            updated = applyOne(updated, doc, bump, properties);
+        }
+        return updated;
+    }
+
+    private String applyOne(String pom, Document doc, BumpedDependency bump, Map<String, String> properties) {
+        String g = bump.groupId();
+        String a = bump.artifactId();
+        String newVer = bump.newVersion();
+
+        for (String wrapper : new String[]{"dependencies", "dependencyManagement", "plugins", "pluginManagement"}) {
+            NodeList wrappers = doc.getElementsByTagName(wrapper);
+            for (int i = 0; i < wrappers.getLength(); i++) {
+                Element w = (Element) wrappers.item(i);
+                String childTag = wrapper.startsWith("dep") ? "dependency" : "plugin";
+                NodeList nodes = w.getElementsByTagName(childTag);
+                for (int j = 0; j < nodes.getLength(); j++) {
+                    Element node = (Element) nodes.item(j);
+                    if (!g.equals(textOfChild(node, "groupId"))) continue;
+                    if (!a.equals(textOfChild(node, "artifactId"))) continue;
+                    String rawVer = textOfChild(node, "version");
+                    if (rawVer == null) continue;
+                    if (isPropertyRef(rawVer)) {
+                        String key = extractPropertyKey(rawVer);
+                        String current = properties.get(key);
+                        if (current != null && !current.equals(newVer)) {
+                            pom = replacePropertyValue(pom, key, current, newVer);
+                            properties.put(key, newVer);
+                        }
+                    } else if (!rawVer.equals(newVer)) {
+                        pom = replaceVersionInBlock(pom, node, rawVer, newVer);
                     }
                 }
             }
-            if (model.getParent() != null && bump.groupId().equals(model.getParent().getGroupId())
-                    && bump.artifactId().equals(model.getParent().getArtifactId())) {
-                model.getParent().setVersion(bump.newVersion());
+        }
+
+        NodeList parentNodes = doc.getElementsByTagName("parent");
+        for (int i = 0; i < parentNodes.getLength(); i++) {
+            Element p = (Element) parentNodes.item(i);
+            if (p.getParentNode() != doc.getDocumentElement()) continue;
+            if (!g.equals(textOfChild(p, "groupId"))) continue;
+            if (!a.equals(textOfChild(p, "artifactId"))) continue;
+            String rawVer = textOfChild(p, "version");
+            if (rawVer != null && !rawVer.equals(newVer)) {
+                pom = replaceVersionInBlock(pom, p, rawVer, newVer);
             }
         }
-        return serialize(model);
+        return pom;
+    }
+
+    private static Map<String, String> readProperties(Document doc) {
+        Map<String, String> out = new java.util.HashMap<>();
+        NodeList props = doc.getElementsByTagName("properties");
+        for (int i = 0; i < props.getLength(); i++) {
+            Element p = (Element) props.item(i);
+            NodeList kids = p.getChildNodes();
+            for (int j = 0; j < kids.getLength(); j++) {
+                if (kids.item(j) instanceof Element el) {
+                    out.put(el.getTagName(), el.getTextContent() == null ? "" : el.getTextContent().trim());
+                }
+            }
+        }
+        return out;
+    }
+
+    private static String replacePropertyValue(String pom, String key, String oldVal, String newVal) {
+        String open = "<" + key + ">";
+        String close = "</" + key + ">";
+        int start = pom.indexOf(open);
+        while (start >= 0) {
+            int valStart = start + open.length();
+            int end = pom.indexOf(close, valStart);
+            if (end < 0) break;
+            String between = pom.substring(valStart, end);
+            if (between.trim().equals(oldVal)) {
+                return pom.substring(0, valStart) + between.replace(oldVal, newVal) + pom.substring(end);
+            }
+            start = pom.indexOf(open, end);
+        }
+        return pom;
+    }
+
+    private static String replaceVersionInBlock(String pom, Element block, String oldVer, String newVer) {
+        String gid = textOfChild(block, "groupId");
+        String aid = textOfChild(block, "artifactId");
+        if (gid == null || aid == null) return pom;
+        int pos = 0;
+        while (pos < pom.length()) {
+            int gIdx = pom.indexOf("<groupId>" + gid + "</groupId>", pos);
+            if (gIdx < 0) return pom;
+            int aIdx = pom.indexOf("<artifactId>" + aid + "</artifactId>", gIdx);
+            if (aIdx < 0) return pom;
+            int vOpen = pom.indexOf("<version>", aIdx);
+            if (vOpen < 0) return pom;
+            int vClose = pom.indexOf("</version>", vOpen);
+            if (vClose < 0) return pom;
+            String between = pom.substring(vOpen + "<version>".length(), vClose);
+            if (between.trim().equals(oldVer)) {
+                return pom.substring(0, vOpen) + "<version>" + newVer + "</version>" + pom.substring(vClose + "</version>".length());
+            }
+            pos = vClose + 1;
+        }
+        return pom;
     }
 
     private void checkDep(String groupId, String artifactId, String currentVersion,
@@ -141,30 +219,6 @@ public class PomManager {
         if (latestVersion != null && VersionComparator.isOlderThan(currentVersion, latestVersion)) {
             String updatedBy = updatedByMap.getOrDefault(key, "unknown");
             bumps.add(new BumpedDependency(groupId, artifactId, currentVersion, latestVersion, updatedBy));
-        }
-    }
-
-    private boolean matches(Dependency dep, BumpedDependency bump) {
-        return bump.groupId().equals(dep.getGroupId()) && bump.artifactId().equals(dep.getArtifactId());
-    }
-
-    private boolean matchesPlugin(Plugin plugin, BumpedDependency bump) {
-        return bump.groupId().equals(plugin.getGroupId()) && bump.artifactId().equals(plugin.getArtifactId());
-    }
-
-    private void setVersion(Dependency dep, String newVersion, Properties props) {
-        if (isPropertyRef(dep.getVersion())) {
-            props.setProperty(extractPropertyKey(dep.getVersion()), newVersion);
-        } else {
-            dep.setVersion(newVersion);
-        }
-    }
-
-    private void setPluginVersion(Plugin plugin, String newVersion, Properties props) {
-        if (isPropertyRef(plugin.getVersion())) {
-            props.setProperty(extractPropertyKey(plugin.getVersion()), newVersion);
-        } else {
-            plugin.setVersion(newVersion);
         }
     }
 
@@ -185,13 +239,7 @@ public class PomManager {
     }
 
     private Model parse(String pomContent) throws Exception {
-        return new MavenXpp3Reader().read(new StringReader(pomContent));
-    }
-
-    private String serialize(Model model) throws Exception {
-        StringWriter writer = new StringWriter();
-        new MavenXpp3Writer().write(writer, model);
-        return writer.toString();
+        return new MavenXpp3Reader().read(new StringReader(pomContent), false);
     }
 
     private static Document parseXmlDom(String xml) throws Exception {
