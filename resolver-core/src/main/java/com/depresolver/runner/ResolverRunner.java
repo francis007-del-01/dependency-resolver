@@ -1,8 +1,7 @@
 package com.depresolver.runner;
 
 import com.depresolver.artifactory.ArtifactoryClient;
-import com.depresolver.artifactory.GitPropertiesExtractor.GitInfo;
-import com.depresolver.artifactory.JarScmExtractor;
+import com.depresolver.artifactory.ArtifactoryClient.GitInfo;
 import com.depresolver.config.ServiceUserProperties;
 import com.depresolver.github.GitHubClient;
 import com.depresolver.github.GitHubClient.CommitAuthor;
@@ -150,7 +149,7 @@ public class ResolverRunner implements ApplicationRunner {
             return releaseVersion;
         }
 
-        Optional<JarScmExtractor.GitHubCoords> scmOpt;
+        Optional<PomManager.GitHubCoords> scmOpt;
         try {
             scmOpt = artifactoryClient.getReleaseScm(g, a, releaseVersion.get());
         } catch (Exception e) {
@@ -163,7 +162,7 @@ public class ResolverRunner implements ApplicationRunner {
                     d.key());
             return snapshotVersion;
         }
-        JarScmExtractor.GitHubCoords scm = scmOpt.get();
+        PomManager.GitHubCoords scm = scmOpt.get();
 
         List<CommitAuthor> commits;
         try {

@@ -1,26 +1,36 @@
 package com.depresolver.pom;
 
 import com.depresolver.version.VersionComparator;
+import com.depresolver.xml.SecureXmlParser;
 import org.apache.maven.model.Dependency;
 import org.apache.maven.model.Model;
 import org.apache.maven.model.Parent;
 import org.apache.maven.model.Plugin;
 import org.apache.maven.model.io.xpp3.MavenXpp3Reader;
 
-import javax.xml.parsers.DocumentBuilder;
-import javax.xml.parsers.DocumentBuilderFactory;
-import java.io.ByteArrayInputStream;
 import java.io.StringReader;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Properties;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.NodeList;
 
 public class PomManager {
+
+    private static final String TAG_GROUP_ID = "groupId";
+    private static final String TAG_ARTIFACT_ID = "artifactId";
+    private static final String TAG_VERSION = "version";
+    private static final String TAG_DEPENDENCY = "dependency";
+    private static final String TAG_FETCH_LATEST = "fetchLatest";
+    private static final String TAG_FETCH_RELEASE = "fetchRelease";
+
+    private static final String PROPERTY_REF_PREFIX = "${";
+    private static final String PROPERTY_REF_SUFFIX = "}";
 
     public record PomCoordinates(String groupId, String artifactId, String version) {}
 
@@ -29,6 +39,37 @@ public class PomManager {
     }
 
     public record FetchDirectives(List<FetchDirective> latest, List<FetchDirective> release) {}
+
+    public record GitHubCoords(String owner, String name) {}
+
+    private static final Pattern GITHUB_URL = Pattern.compile(
+            "github(?:\\.[a-zA-Z0-9.-]+)?(?:\\.com)?[:/]([^/]+)/([^/.\\s]+?)(?:\\.git)?(?:/|$)");
+
+    public Optional<GitHubCoords> extractGitHubCoords(String pomContent) {
+        try {
+            Document doc = SecureXmlParser.parse(pomContent);
+            NodeList scmNodes = doc.getElementsByTagName("scm");
+            if (scmNodes.getLength() == 0) return Optional.empty();
+            Element scm = (Element) scmNodes.item(0);
+            for (String field : new String[]{"url", "connection", "developerConnection"}) {
+                Optional<GitHubCoords> coords = parseGitHubUrl(SecureXmlParser.textOfChild(scm, field));
+                if (coords.isPresent()) return coords;
+            }
+            return Optional.empty();
+        } catch (Exception e) {
+            return Optional.empty();
+        }
+    }
+
+    private static Optional<GitHubCoords> parseGitHubUrl(String raw) {
+        if (raw == null || raw.isBlank()) return Optional.empty();
+        String s = raw.trim()
+                .replaceFirst("^scm:git:", "")
+                .replaceFirst("^scm:", "");
+        Matcher m = GITHUB_URL.matcher(s);
+        if (!m.find()) return Optional.empty();
+        return Optional.of(new GitHubCoords(m.group(1), m.group(2)));
+    }
 
     public PomCoordinates readCoordinates(String pomContent) throws Exception {
         Model model = parse(pomContent);
@@ -40,9 +81,9 @@ public class PomManager {
     }
 
     public FetchDirectives readFetchDirectives(String pomContent) throws Exception {
-        Document doc = parseXmlDom(pomContent);
-        List<FetchDirective> latest = readDirectiveList(doc, "fetchLatest");
-        List<FetchDirective> release = readDirectiveList(doc, "fetchRelease");
+        Document doc = SecureXmlParser.parse(pomContent);
+        List<FetchDirective> latest = readDirectiveList(doc, TAG_FETCH_LATEST);
+        List<FetchDirective> release = readDirectiveList(doc, TAG_FETCH_RELEASE);
         return new FetchDirectives(latest, release);
     }
 
@@ -51,11 +92,11 @@ public class PomManager {
         NodeList wrappers = doc.getElementsByTagName(wrapperTag);
         for (int i = 0; i < wrappers.getLength(); i++) {
             Element wrapper = (Element) wrappers.item(i);
-            NodeList deps = wrapper.getElementsByTagName("dependency");
+            NodeList deps = wrapper.getElementsByTagName(TAG_DEPENDENCY);
             for (int j = 0; j < deps.getLength(); j++) {
                 Element dep = (Element) deps.item(j);
-                String g = textOfChild(dep, "groupId");
-                String a = textOfChild(dep, "artifactId");
+                String g = SecureXmlParser.textOfChild(dep, TAG_GROUP_ID);
+                String a = SecureXmlParser.textOfChild(dep, TAG_ARTIFACT_ID);
                 if (g != null && a != null) out.add(new FetchDirective(g.trim(), a.trim()));
             }
         }
@@ -100,7 +141,7 @@ public class PomManager {
     }
 
     public String applyBumps(String pomContent, List<BumpedDependency> bumps) throws Exception {
-        Document doc = parseXmlDom(pomContent);
+        Document doc = SecureXmlParser.parse(pomContent);
         Map<String, String> properties = readProperties(doc);
         String updated = pomContent;
 
@@ -123,9 +164,9 @@ public class PomManager {
                 NodeList nodes = w.getElementsByTagName(childTag);
                 for (int j = 0; j < nodes.getLength(); j++) {
                     Element node = (Element) nodes.item(j);
-                    if (!g.equals(textOfChild(node, "groupId"))) continue;
-                    if (!a.equals(textOfChild(node, "artifactId"))) continue;
-                    String rawVer = textOfChild(node, "version");
+                    if (!g.equals(SecureXmlParser.textOfChild(node, TAG_GROUP_ID))) continue;
+                    if (!a.equals(SecureXmlParser.textOfChild(node, TAG_ARTIFACT_ID))) continue;
+                    String rawVer = SecureXmlParser.textOfChild(node, TAG_VERSION);
                     if (rawVer == null) continue;
                     if (isPropertyRef(rawVer)) {
                         String key = extractPropertyKey(rawVer);
@@ -145,9 +186,9 @@ public class PomManager {
         for (int i = 0; i < parentNodes.getLength(); i++) {
             Element p = (Element) parentNodes.item(i);
             if (p.getParentNode() != doc.getDocumentElement()) continue;
-            if (!g.equals(textOfChild(p, "groupId"))) continue;
-            if (!a.equals(textOfChild(p, "artifactId"))) continue;
-            String rawVer = textOfChild(p, "version");
+            if (!g.equals(SecureXmlParser.textOfChild(p, TAG_GROUP_ID))) continue;
+            if (!a.equals(SecureXmlParser.textOfChild(p, TAG_ARTIFACT_ID))) continue;
+            String rawVer = SecureXmlParser.textOfChild(p, TAG_VERSION);
             if (rawVer != null && !rawVer.equals(newVer)) {
                 pom = replaceVersionInBlock(pom, p, rawVer, newVer);
             }
@@ -188,8 +229,8 @@ public class PomManager {
     }
 
     private static String replaceVersionInBlock(String pom, Element block, String oldVer, String newVer) {
-        String gid = textOfChild(block, "groupId");
-        String aid = textOfChild(block, "artifactId");
+        String gid = SecureXmlParser.textOfChild(block, TAG_GROUP_ID);
+        String aid = SecureXmlParser.textOfChild(block, TAG_ARTIFACT_ID);
         if (gid == null || aid == null) return pom;
         int pos = 0;
         while (pos < pom.length()) {
@@ -231,29 +272,15 @@ public class PomManager {
     }
 
     private boolean isPropertyRef(String value) {
-        return value != null && value.startsWith("${") && value.endsWith("}");
+        return value != null && value.startsWith(PROPERTY_REF_PREFIX) && value.endsWith(PROPERTY_REF_SUFFIX);
     }
 
     private String extractPropertyKey(String value) {
-        return value.substring(2, value.length() - 1);
+        return value.substring(PROPERTY_REF_PREFIX.length(), value.length() - PROPERTY_REF_SUFFIX.length());
     }
 
     private Model parse(String pomContent) throws Exception {
         return new MavenXpp3Reader().read(new StringReader(pomContent), false);
     }
 
-    private static Document parseXmlDom(String xml) throws Exception {
-        DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
-        dbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-        dbf.setFeature("http://xml.org/sax/features/external-general-entities", false);
-        dbf.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
-        DocumentBuilder db = dbf.newDocumentBuilder();
-        return db.parse(new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));
-    }
-
-    private static String textOfChild(Element parent, String tag) {
-        NodeList children = parent.getElementsByTagName(tag);
-        if (children.getLength() == 0) return null;
-        return children.item(0).getTextContent();
-    }
 }

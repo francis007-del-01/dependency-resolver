@@ -117,6 +117,171 @@ resolver:
 
 Any commit whose author name or email matches (case-insensitive) is treated as a bot.
 
+## Usage
+
+End-to-end walkthrough for operators (running the tool) and repo owners (wiring up their pom).
+
+### 1. Onboarding a target repo (repo owner task)
+
+Before the resolver can touch a repo, that repo needs to tell it what to track. This is one-time setup per repo.
+
+**a. Add directives to the repo's `pom.xml`.** Pick one or both depending on what you want:
+
+- `<fetchLatest>` — resolver decides between the newest release and the newest SNAPSHOT by comparing `git.commit.id`s (falls back to SNAPSHOT if info is missing). Use this for libraries you co-develop, where you want the freshest safe build.
+- `<fetchRelease>` — resolver only considers releases, never SNAPSHOTs. Use this for stable third-party-style deps.
+
+```xml
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  ...
+  <!-- Existing dependencies stay exactly where they are -->
+
+  <fetchLatest>
+    <dependency>
+      <groupId>com.intuit.payment.common</groupId>
+      <artifactId>pymt-lib</artifactId>
+    </dependency>
+  </fetchLatest>
+
+  <fetchRelease>
+    <dependency>
+      <groupId>com.intuit.payment</groupId>
+      <artifactId>pymt-schema</artifactId>
+    </dependency>
+  </fetchRelease>
+</project>
+```
+
+Maven ignores unknown top-level elements, so these directives don't affect your normal build. Only `<groupId>` + `<artifactId>` are read — no version needed (the resolver infers current version from wherever the dep actually lives in the pom).
+
+**b. For `fetchLatest` libraries only:** make sure the library (the one being tracked, not your repo) publishes `META-INF/git.properties` in its jar. See ["SHA comparison for `fetchLatest`"](#sha-comparison-for-fetchlatest) above for the plugin snippet. Without this, the resolver can't compare release vs. SNAPSHOT SHAs and will always prefer SNAPSHOT (safe default, logs a WARN).
+
+**c. For `fetchLatest` libraries only:** make sure the library declares `<scm>` in its root pom pointing at the GitHub repo:
+
+```xml
+<scm>
+  <url>https://github.com/myorg/pymt-lib</url>
+  <connection>scm:git:https://github.com/myorg/pymt-lib.git</connection>
+</scm>
+```
+
+Without this, the resolver can't filter bot commits via GitHub `compare` and will fall back to SNAPSHOT.
+
+### 2. Running the resolver
+
+Three ways to invoke it. All three need the same env vars.
+
+#### Option A — Local / ad-hoc
+
+Quickest path for testing or a one-off bump.
+
+```bash
+# Build once
+mvn -pl resolver-core clean package
+
+# Export credentials (Artifactory base URL + repo names usually don't change)
+export GITHUB_TOKEN=ghp_...
+export ARTIFACTORY_TOKEN=...
+export ARTIFACTORY_BASE_URL=https://artifactory.a.intuit.com/artifactory
+export ARTIFACTORY_RELEASE_REPO=maven.billingcomm-custpayment.ngp-releases
+export ARTIFACTORY_SNAPSHOT_REPO=maven.billingcomm-custpayment.ngp-snapshots
+
+# Run it
+java -jar resolver-core/target/resolver-core-1.0.0-SNAPSHOT.jar \
+  --owner=myorg \
+  --repo=my-service \
+  --branch=develop
+```
+
+The resolver will fetch `pom.xml` at HEAD of `develop`, compute bumps, and push a commit **directly to `develop`** if anything's outdated. If nothing needs updating, it exits without committing.
+
+> **Heads up:** this writes to the branch. Always test against a throwaway branch first.
+
+#### Option B — Jenkins (shared-lib pipeline)
+
+See `jenkins-shared-lib/Jenkinsfile-simple` for a minimal example. The pipeline takes `OWNER`, `REPO`, `BRANCH`, and optional `POM_PATH` as build parameters.
+
+**One-time Jenkins setup:**
+
+1. Bake the resolver jar into your agent image at `/opt/resolver-core.jar` (see `docker/Dockerfile` for a starter image).
+2. Add two string credentials to Jenkins:
+   - `github-api-token` — a PAT with `repo` scope.
+   - `artifactory-token` — an Artifactory identity token with read on both release and snapshot repos.
+3. Export `ARTIFACTORY_BASE_URL`, `ARTIFACTORY_RELEASE_REPO`, `ARTIFACTORY_SNAPSHOT_REPO` as Jenkins global env vars (or bake them into the agent image).
+4. Create a parameterized pipeline job pointed at `Jenkinsfile-simple`.
+
+**Per-run:** trigger the job with the repo parameters. Jenkins injects the credentials, runs the jar, and logs the resolver's output to the build log.
+
+#### Option C — Docker
+
+For CI systems other than Jenkins, or for a cleanly sandboxed local run.
+
+```bash
+# Build the jar
+mvn -pl resolver-core clean package
+
+# Run in an eclipse-temurin:21 container with the jar mounted
+docker run --rm \
+  -e GITHUB_TOKEN \
+  -e ARTIFACTORY_TOKEN \
+  -e ARTIFACTORY_BASE_URL \
+  -e ARTIFACTORY_RELEASE_REPO \
+  -e ARTIFACTORY_SNAPSHOT_REPO \
+  -v "$PWD/resolver-core/target/resolver-core-1.0.0-SNAPSHOT.jar:/opt/resolver.jar:ro" \
+  eclipse-temurin:21-jre \
+  java -jar /opt/resolver.jar \
+    --owner=myorg --repo=my-service --branch=develop
+```
+
+### 3. What to expect in the output
+
+Run the resolver with `--branch=develop` against a repo that has one `fetchLatest` dep needing an update. Typical log:
+
+```
+Resolving for myorg/my-service@develop (pom=pom.xml)
+Read pom.xml @ 3a7f2c... (sha)
+fetchLatest directives: [com.intuit.payment.common:pymt-lib]
+fetchRelease directives: []
+  fetchLatest com.intuit.payment.common:pymt-lib
+    latest release  = 1.0.443.0
+    latest snapshot = 1.0.444.0-SNAPSHOT
+    release SHA     = a91ea83f (clean)
+    snapshot SHA    = d1972ed4 (clean)
+    SHAs differ → checking commits
+    compare myorg/pymt-lib a91ea83f...d1972ed4 → 3 commits, 1 human
+    → using SNAPSHOT (1.0.444.0-SNAPSHOT)
+Bumps: com.intuit.payment.common:pymt-lib 1.0.443.0 → 1.0.444.0-SNAPSHOT
+Applied 1 bump(s)
+Updated pom.xml on branch develop in myorg/my-service
+```
+
+Possible outcomes per dep:
+
+| Log tail | Meaning |
+|---|---|
+| `same SHA → using release` | Release and SNAPSHOT came from identical source; picking release. |
+| `zero human commits → using release` | SNAPSHOT has only bot commits since release; picking release. |
+| `N human commits → using SNAPSHOT` | Real changes in SNAPSHOT; picking SNAPSHOT. |
+| `no git.properties → preferring SNAPSHOT` | Library jar lacks the plugin; falling back. |
+| `no <scm> → preferring SNAPSHOT` | Can't reach GitHub to classify; falling back. |
+| `no bumps` | Pom's current version is already at or ahead of the resolved latest. |
+
+### 4. Verifying a run
+
+- **Check the branch:** the resolver commits under the GitHub token's identity. `git log -1 BRANCH` on your local clone (after `git pull`) shows the bump commit with a generated message listing each `(g:a) old → new`.
+- **Diff the pom:** the resolver touches only `<version>` elements (or `<properties>` entries when versions are property-refs). Whitespace and element order are preserved.
+- **Re-run is idempotent:** running the resolver again against the same branch with nothing new in Artifactory is a no-op — no commit, no error.
+
+### 5. Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `401 Unauthorized` from GitHub | Token missing `repo` scope, or expired | Regenerate PAT, re-set `GITHUB_TOKEN` |
+| `403` from Artifactory | Token doesn't have read access on one of the configured repos | Grant read on both `*-releases` and `*-snapshots` |
+| `fetchLatest` always picks SNAPSHOT for a specific lib | Library missing `git.properties` or `<scm>` | Add `git-commit-id-maven-plugin` / `<scm>` block to that library's pom |
+| Resolver says "no bumps" but you see a newer version in Artifactory | Artifactory `maven-metadata.xml` not yet updated (eventual consistency after deploy), or your pom already at that version | Wait ~1 min and re-run; confirm pom's current version |
+| Commit pushed but CI didn't trigger | Target branch has branch-protection rules that require PRs | Run against a feature branch instead, then open a PR manually |
+| `CannotResolve`/`IOException` with URL in message | Env var misconfigured (typo in repo name or base URL) | Double-check all five `ARTIFACTORY_*` env vars |
+
 ## Environment
 
 Required env vars (set as Jenkins credentials):
@@ -144,21 +309,6 @@ Required env vars (set as Jenkins credentials):
 mvn -pl resolver-core clean package
 ```
 
-Produces `resolver-core/target/resolver-core-1.0.0-SNAPSHOT.jar`.
+Produces `resolver-core/target/resolver-core-1.0.0-SNAPSHOT.jar`. Requires Java 21+.
 
-## Run locally
-
-```bash
-export GITHUB_TOKEN=...
-export ARTIFACTORY_TOKEN=...
-export ARTIFACTORY_BASE_URL=https://artifactory.a.intuit.com/artifactory
-export ARTIFACTORY_RELEASE_REPO=maven.billingcomm-custpayment.ngp-releases
-export ARTIFACTORY_SNAPSHOT_REPO=maven.billingcomm-custpayment.ngp-snapshots
-
-java -jar resolver-core/target/resolver-core-1.0.0-SNAPSHOT.jar \
-  --owner=myorg \
-  --repo=my-service \
-  --branch=develop
-```
-
-Requires Java 21+.
+For running instructions, see [Usage → Running the resolver](#2-running-the-resolver) above.

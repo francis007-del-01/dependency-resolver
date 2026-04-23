@@ -68,16 +68,15 @@ A one-shot CLI that updates a single target repo's pom dependencies. Invoked by 
 | File | Role |
 |---|---|
 | `runner/ResolverRunner.java` | CLI entry; `ApplicationRunner` that parses `--owner/--repo/--branch/--pomPath`, orchestrates the flow. |
-| `pom/PomManager.java` | Parses `<fetchLatest>/<fetchRelease>` directives; finds and applies version bumps (direct, property, managed, plugins, parent). |
+| `pom/PomManager.java` | Parses `<fetchLatest>/<fetchRelease>` directives; finds and applies version bumps (direct, property, managed, plugins, parent); also owns `extractGitHubCoords(pomContent)` which parses `<scm>` (url / connection / developerConnection) and matches a GitHub URL pattern (github.com + GHE hosts + SSH form) to extract `owner/name`. |
 | `pom/BumpedDependency.java` | Result record: `(groupId, artifactId, oldVersion, newVersion, updatedBy)`. |
-| `artifactory/ArtifactoryClient.java` | `latestReleaseVersion(g, a)` + `latestSnapshotBaseVersion(g, a)` (from `maven-metadata.xml`); jar fetchers `getReleaseGitInfo(g, a, v)` / `getSnapshotGitInfo(g, a, baseVersion)` extract `git.commit.id`; `getReleaseScm(g, a, v)` extracts the library's GitHub `owner/name` from the release jar's embedded pom. Caches raw jar bytes, git info, and SCM by `(g:a:version)` forever — timestamped SNAPSHOT versions are immutable, releases never move. XXE-hardened. |
-| `artifactory/GitPropertiesExtractor.java` | Streams a jar's zip entries to pull `git.commit.id` + `git.dirty` from `META-INF/git.properties`. |
-| `artifactory/JarScmExtractor.java` | Streams a jar's zip entries to find `META-INF/maven/<g>/<a>/pom.xml`, parses `<scm>` (url / connection / developerConnection), matches a GitHub URL pattern (github.com + GHE hosts + SSH form) to extract `owner/name`. |
-| `config/ServiceUserProperties.java` | Bot-author list from `application.yml`. Matches name + email case-insensitively. |
-| `artifactory/ArtifactoryProperties.java` | Spring `@ConfigurationProperties` for `base-url`, `release-repo`, `snapshot-repo`, `token`. |
-| `github/GitHubClient.java` | File read/write via Contents API. |
+| `artifactory/ArtifactoryClient.java` | HTTP fetches against Artifactory: `latestReleaseVersion(g, a)` / `latestSnapshotBaseVersion(g, a)` (read `maven-metadata.xml`); `getReleaseGitInfo(g, a, v)` / `getSnapshotGitInfo(g, a, baseVersion)` fetch the jar and extract `git.commit.id` from `META-INF/git.properties`; `getReleaseScm(g, a, v)` fetches the release jar, pulls out the embedded `META-INF/maven/*/pom.xml`, and delegates SCM parsing to `PomManager`. Stateless — no caching (each run processes one repo then exits). |
+| `artifactory/MavenMetadataParser.java` | Parses `maven-metadata.xml` bytes into `latestReleaseVersion`, `latestSnapshotBaseVersion`, and `latestTimestampedJarVersion` (resolves `1.2.3-SNAPSHOT` → actual timestamped filename like `1.2.3-20260423.161847-3`). |
+| `xml/SecureXmlParser.java` | Shared XXE-hardened `DocumentBuilderFactory` + `textOfChild` helper. Single source of truth for secure XML parsing across `PomManager` and `MavenMetadataParser`. |
+| `github/GitHubClient.java` | File read/write via Contents API; `compareCommits(owner, repo, base, head)` returns authors between two SHAs. |
 | `version/VersionComparator.java` | Semver-aware "is older than" used by the bump check. |
-| `config/AppConfig.java` | Bean wiring. |
+| `config/AppConfig.java` | Bean wiring. Owns `@EnableConfigurationProperties` for all three properties classes. |
+| `config/*Properties.java` | Spring `@ConfigurationProperties`: `ArtifactoryProperties` (`artifactory.*`), `GitHubProperties` (`github.*`), `ServiceUserProperties` (`resolver.service-user.*`). All co-located in `config/`. |
 
 ## Custom pom directives
 

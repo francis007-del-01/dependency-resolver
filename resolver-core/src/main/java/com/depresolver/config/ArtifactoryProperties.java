@@ -1,4 +1,4 @@
-package com.depresolver.artifactory;
+package com.depresolver.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 

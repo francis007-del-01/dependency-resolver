@@ -1,5 +1,6 @@
 package com.depresolver.artifactory;
 
+import com.depresolver.pom.PomManager;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -49,7 +50,7 @@ class ArtifactoryClientTest {
     }
 
     private ArtifactoryClient client() {
-        return new ArtifactoryClient(baseUrl, "rel", "snap", "tok");
+        return new ArtifactoryClient(baseUrl, "rel", "snap", "tok", new PomManager(), new MavenMetadataParser());
     }
 
     private static byte[] jarWithGitSha(String sha, boolean dirty) throws IOException {
@@ -131,7 +132,7 @@ class ArtifactoryClientTest {
         byte[] jar = jarWithGitSha("abc1234567890abcdef1234567890abcdef12345", false);
         route("/rel/com/intuit/pymt-lib/1.0.443.0/pymt-lib-1.0.443.0.jar", 200, jar);
 
-        Optional<GitPropertiesExtractor.GitInfo> info =
+        Optional<ArtifactoryClient.GitInfo> info =
                 client().getReleaseGitInfo("com.intuit", "pymt-lib", "1.0.443.0");
         assertTrue(info.isPresent());
         assertEquals("abc1234567890abcdef1234567890abcdef12345", info.get().commitSha());
@@ -159,7 +160,7 @@ class ArtifactoryClientTest {
         byte[] jar = jarWithGitSha("def4567890abcdef1234567890abcdef12345678", false);
         route("/snap/com/intuit/pymt-lib/1.0.444.0-SNAPSHOT/pymt-lib-1.0.444.0-20260420.143547-42.jar", 200, jar);
 
-        Optional<GitPropertiesExtractor.GitInfo> info =
+        Optional<ArtifactoryClient.GitInfo> info =
                 client().getSnapshotGitInfo("com.intuit", "pymt-lib", "1.0.444.0-SNAPSHOT");
         assertTrue(info.isPresent());
         assertEquals("def4567890abcdef1234567890abcdef12345678", info.get().commitSha());
@@ -182,14 +183,14 @@ class ArtifactoryClientTest {
                 "com.intuit", "pymt-lib");
         route("/rel/com/intuit/pymt-lib/1.0.443.0/pymt-lib-1.0.443.0.jar", 200, jar);
 
-        Optional<JarScmExtractor.GitHubCoords> c =
+        Optional<PomManager.GitHubCoords> c =
                 client().getReleaseScm("com.intuit", "pymt-lib", "1.0.443.0");
         assertTrue(c.isPresent());
         assertEquals("myorg", c.get().owner());
         assertEquals("core-lib", c.get().name());
     }
 
-    @Test void snapshotGitInfoIsCachedAcrossCalls() throws Exception {
+    @Test void snapshotGitInfoIsConsistentAcrossCalls() throws Exception {
         routeText("/snap/com/intuit/cached/1.0.0-SNAPSHOT/maven-metadata.xml", 200, """
                 <?xml version="1.0"?>
                 <metadata>
