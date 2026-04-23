@@ -71,15 +71,6 @@ public class PomManager {
         return Optional.of(new GitHubCoords(m.group(1), m.group(2)));
     }
 
-    public PomCoordinates readCoordinates(String pomContent) throws Exception {
-        Model model = parse(pomContent);
-        String groupId = model.getGroupId() != null ? model.getGroupId()
-                : (model.getParent() != null ? model.getParent().getGroupId() : null);
-        String version = model.getVersion() != null ? model.getVersion()
-                : (model.getParent() != null ? model.getParent().getVersion() : null);
-        return new PomCoordinates(groupId, model.getArtifactId(), version);
-    }
-
     public FetchDirectives readFetchDirectives(String pomContent) throws Exception {
         Document doc = SecureXmlParser.parse(pomContent);
         List<FetchDirective> latest = readDirectiveList(doc, TAG_FETCH_LATEST);
