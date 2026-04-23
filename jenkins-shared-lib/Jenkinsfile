@@ -1,4 +1,8 @@
 // Build-from-source variant of the dependency-resolver pipeline.
+// Clones the dependency-resolver repo from GitHub, builds the jar with Maven,
+// then runs it against the target (owner/repo/branch). Self-contained — no
+// dependency on a host bind mount or pre-baked agent image.
+//
 // For a thinner pipeline that runs a pre-built jar from the agent image,
 // see Jenkinsfile-simple in this directory.
 
@@ -6,17 +10,22 @@ pipeline {
     agent any
 
     parameters {
-        string(name: 'OWNER',    description: 'GitHub repo owner (org)',              defaultValue: '')
-        string(name: 'REPO',     description: 'GitHub repo name',                     defaultValue: '')
-        string(name: 'BRANCH',   description: 'Target branch to update',              defaultValue: '')
-        string(name: 'POM_PATH', description: 'Path to pom.xml within the repo',      defaultValue: 'pom.xml')
+        string(name: 'OWNER',           description: 'GitHub repo owner (org) of the consumer to resolve',                 defaultValue: 'francis007-del-01')
+        string(name: 'REPO',            description: 'GitHub repo name of the consumer to resolve',                        defaultValue: 'dep-resolver-sandbox-consumer')
+        string(name: 'BRANCH',          description: 'Target branch on the consumer to update',                            defaultValue: 'main')
+        string(name: 'POM_PATH',        description: 'Path to pom.xml within the consumer repo',                           defaultValue: 'pom.xml')
+        string(name: 'RESOLVER_REPO',   description: 'GitHub repo hosting the resolver source (owner/name)',                defaultValue: 'francis007-del-01/dependency-resolver')
+        string(name: 'RESOLVER_REF',    description: 'Branch/tag/commit of the resolver source to build',                   defaultValue: 'main')
     }
 
     environment {
         // Artifactory coordinates — override per Jenkins instance or bake into the agent image.
-        ARTIFACTORY_BASE_URL      = "${env.ARTIFACTORY_BASE_URL      ?: 'https://artifactory.a.intuit.com/artifactory'}"
-        ARTIFACTORY_RELEASE_REPO  = "${env.ARTIFACTORY_RELEASE_REPO  ?: 'maven.billingcomm-custpayment.ngp-releases'}"
-        ARTIFACTORY_SNAPSHOT_REPO = "${env.ARTIFACTORY_SNAPSHOT_REPO ?: 'maven.billingcomm-custpayment.ngp-snapshots'}"
+        ARTIFACTORY_BASE_URL      = "${env.ARTIFACTORY_BASE_URL      ?: 'http://host.docker.internal:8082'}"
+        ARTIFACTORY_RELEASE_REPO  = "${env.ARTIFACTORY_RELEASE_REPO  ?: 'releases'}"
+        ARTIFACTORY_SNAPSHOT_REPO = "${env.ARTIFACTORY_SNAPSHOT_REPO ?: 'snapshots'}"
+
+        RESOLVER_SRC_DIR = "${WORKSPACE}/resolver-src"
+        RESOLVER_JAR     = "${WORKSPACE}/resolver-src/resolver-core/target/resolver-core-1.0.0-SNAPSHOT.jar"
     }
 
     options {
@@ -32,13 +41,35 @@ pipeline {
                         error "OWNER, REPO, and BRANCH parameters are all required."
                     }
                     echo "Resolving dependencies for ${params.OWNER}/${params.REPO}@${params.BRANCH} (pom=${params.POM_PATH})"
+                    echo "Using resolver source: ${params.RESOLVER_REPO} @ ${params.RESOLVER_REF}"
                 }
             }
         }
 
-        stage('Build') {
+        stage('Fetch Resolver Source') {
             steps {
-                sh 'cd /var/jenkins_home/project && mvn clean package -pl resolver-core -am -DskipTests'
+                withCredentials([string(credentialsId: 'github-api-token', variable: 'GITHUB_TOKEN')]) {
+                    sh '''
+                        set -euo pipefail
+                        rm -rf "${RESOLVER_SRC_DIR}"
+                        git clone --depth 1 --branch "${RESOLVER_REF}" \
+                            "https://x-access-token:${GITHUB_TOKEN}@github.com/${RESOLVER_REPO}.git" \
+                            "${RESOLVER_SRC_DIR}"
+                        echo "Resolver source at commit: $(git -C "${RESOLVER_SRC_DIR}" rev-parse HEAD)"
+                    '''
+                }
+            }
+        }
+
+        stage('Build Resolver Jar') {
+            steps {
+                sh '''
+                    set -euo pipefail
+                    cd "${RESOLVER_SRC_DIR}"
+                    mvn -pl resolver-core -am clean package -DskipTests -B
+                    test -f "${RESOLVER_JAR}" || { echo "Expected jar not found: ${RESOLVER_JAR}"; exit 1; }
+                    echo "Built jar: $(ls -la "${RESOLVER_JAR}")"
+                '''
             }
         }
 
@@ -49,7 +80,8 @@ pipeline {
                     string(credentialsId: 'artifactory-token', variable: 'ARTIFACTORY_TOKEN'),
                 ]) {
                     sh '''
-                        java -jar /var/jenkins_home/project/resolver-core/target/resolver-core-1.0.0-SNAPSHOT.jar \
+                        set -euo pipefail
+                        java -jar "${RESOLVER_JAR}" \
                             --owner="${OWNER}" \
                             --repo="${REPO}" \
                             --branch="${BRANCH}" \
@@ -61,6 +93,7 @@ pipeline {
     }
 
     post {
+        always  { sh 'rm -rf "${RESOLVER_SRC_DIR}" || true' }
         failure { echo "Dependency resolver failed for ${params.OWNER}/${params.REPO}@${params.BRANCH}" }
         success { echo "Dependency resolver completed for ${params.OWNER}/${params.REPO}@${params.BRANCH}" }
     }
