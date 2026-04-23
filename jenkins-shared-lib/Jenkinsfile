@@ -1,8 +1,22 @@
+// Build-from-source variant of the dependency-resolver pipeline.
+// For a thinner pipeline that runs a pre-built jar from the agent image,
+// see Jenkinsfile-simple in this directory.
+
 pipeline {
     agent any
 
-    triggers {
-        cron('H/10 * * * *')
+    parameters {
+        string(name: 'OWNER',    description: 'GitHub repo owner (org)',              defaultValue: '')
+        string(name: 'REPO',     description: 'GitHub repo name',                     defaultValue: '')
+        string(name: 'BRANCH',   description: 'Target branch to update',              defaultValue: '')
+        string(name: 'POM_PATH', description: 'Path to pom.xml within the repo',      defaultValue: 'pom.xml')
+    }
+
+    environment {
+        // Artifactory coordinates — override per Jenkins instance or bake into the agent image.
+        ARTIFACTORY_BASE_URL      = "${env.ARTIFACTORY_BASE_URL      ?: 'https://artifactory.a.intuit.com/artifactory'}"
+        ARTIFACTORY_RELEASE_REPO  = "${env.ARTIFACTORY_RELEASE_REPO  ?: 'maven.billingcomm-custpayment.ngp-releases'}"
+        ARTIFACTORY_SNAPSHOT_REPO = "${env.ARTIFACTORY_SNAPSHOT_REPO ?: 'maven.billingcomm-custpayment.ngp-snapshots'}"
     }
 
     options {
@@ -11,26 +25,43 @@ pipeline {
     }
 
     stages {
+        stage('Validate Inputs') {
+            steps {
+                script {
+                    if (!params.OWNER?.trim() || !params.REPO?.trim() || !params.BRANCH?.trim()) {
+                        error "OWNER, REPO, and BRANCH parameters are all required."
+                    }
+                    echo "Resolving dependencies for ${params.OWNER}/${params.REPO}@${params.BRANCH} (pom=${params.POM_PATH})"
+                }
+            }
+        }
+
         stage('Build') {
             steps {
                 sh 'cd /var/jenkins_home/project && mvn clean package -pl resolver-core -am -DskipTests'
             }
         }
-        stage('Run') {
+
+        stage('Run Resolver') {
             steps {
-                withCredentials([string(credentialsId: 'github-api-token', variable: 'GITHUB_TOKEN')]) {
-                    sh 'java -jar /var/jenkins_home/project/resolver-core/target/resolver-core-1.0.0-SNAPSHOT.jar'
+                withCredentials([
+                    string(credentialsId: 'github-api-token',  variable: 'GITHUB_TOKEN'),
+                    string(credentialsId: 'artifactory-token', variable: 'ARTIFACTORY_TOKEN'),
+                ]) {
+                    sh '''
+                        java -jar /var/jenkins_home/project/resolver-core/target/resolver-core-1.0.0-SNAPSHOT.jar \
+                            --owner="${OWNER}" \
+                            --repo="${REPO}" \
+                            --branch="${BRANCH}" \
+                            --pomPath="${POM_PATH}"
+                    '''
                 }
             }
         }
     }
 
     post {
-        failure {
-            echo "Dependency resolver cron job failed. Check logs for details."
-        }
-        success {
-            echo "Dependency resolver completed successfully."
-        }
+        failure { echo "Dependency resolver failed for ${params.OWNER}/${params.REPO}@${params.BRANCH}" }
+        success { echo "Dependency resolver completed for ${params.OWNER}/${params.REPO}@${params.BRANCH}" }
     }
 }

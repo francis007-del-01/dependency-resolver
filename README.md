@@ -198,16 +198,24 @@ The resolver will fetch `pom.xml` at HEAD of `develop`, compute bumps, and push 
 
 #### Option B — Jenkins (shared-lib pipeline)
 
-See `jenkins-shared-lib/Jenkinsfile-simple` for a minimal example. The pipeline takes `OWNER`, `REPO`, `BRANCH`, and optional `POM_PATH` as build parameters.
+Two Jenkinsfiles live in `jenkins-shared-lib/`, covering the two common Jenkins shapes:
+
+| File | When to use | What it does |
+|---|---|---|
+| `Jenkinsfile-simple` | Agent image has the jar pre-baked at `/opt/resolver-core.jar` | Just runs the jar. Fastest builds. |
+| `Jenkinsfile` | Source is checked out on the agent (no pre-baked jar) | Builds the jar with Maven first, then runs it. |
+
+Both take `OWNER`, `REPO`, `BRANCH`, and optional `POM_PATH` as build parameters and require the same credentials.
 
 **One-time Jenkins setup:**
 
-1. Bake the resolver jar into your agent image at `/opt/resolver-core.jar` (see `docker/Dockerfile` for a starter image).
-2. Add two string credentials to Jenkins:
+1. Add two string credentials to Jenkins:
    - `github-api-token` — a PAT with `repo` scope.
    - `artifactory-token` — an Artifactory identity token with read on both release and snapshot repos.
-3. Export `ARTIFACTORY_BASE_URL`, `ARTIFACTORY_RELEASE_REPO`, `ARTIFACTORY_SNAPSHOT_REPO` as Jenkins global env vars (or bake them into the agent image).
-4. Create a parameterized pipeline job pointed at `Jenkinsfile-simple`.
+2. Export `ARTIFACTORY_BASE_URL`, `ARTIFACTORY_RELEASE_REPO`, `ARTIFACTORY_SNAPSHOT_REPO` as Jenkins global env vars (or rely on the defaults in `Jenkinsfile`, or bake them into the agent image).
+3. For `Jenkinsfile-simple`: bake the resolver jar into your agent image at `/opt/resolver-core.jar` (see `docker/Dockerfile` for a starter image).
+   For `Jenkinsfile`: make sure the source tree is available at `/var/jenkins_home/project` on the agent, with Maven installed.
+4. Create a parameterized pipeline job pointed at whichever Jenkinsfile fits your setup.
 
 **Per-run:** trigger the job with the repo parameters. Jenkins injects the credentials, runs the jar, and logs the resolver's output to the build log.
 
