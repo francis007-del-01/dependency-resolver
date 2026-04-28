@@ -36,6 +36,7 @@ public class GitHubClient {
     // --- File operations (Contents API) ---
 
     public record FileContent(String content, String sha, String path) {}
+    public record PullRequest(int number, String url, String headBranch, String baseBranch) {}
 
     public FileContent getFileContent(String owner, String repo, String path, String ref) throws IOException, InterruptedException {
         String url = "%s/repos/%s/%s/contents/%s?ref=%s".formatted(API_BASE, owner, repo, path, ref);
@@ -60,6 +61,40 @@ public class GitHubClient {
 
         put(url, body);
         log.info("Updated {} on branch {} in {}/{}", path, branch, owner, repo);
+    }
+
+    public String getBranchHeadSha(String owner, String repo, String branch) throws IOException, InterruptedException {
+        String url = "%s/repos/%s/%s/git/ref/heads/%s".formatted(API_BASE, owner, repo, branch);
+        JsonNode node = get(url);
+        JsonNode sha = node.path("object").path("sha");
+        if (sha.isMissingNode() || sha.isNull() || sha.asText().isBlank()) {
+            throw new IOException("Missing branch head SHA for %s/%s branch %s".formatted(owner, repo, branch));
+        }
+        return sha.asText();
+    }
+
+    public void createBranch(String owner, String repo, String newBranch, String baseSha)
+            throws IOException, InterruptedException {
+        String url = "%s/repos/%s/%s/git/refs".formatted(API_BASE, owner, repo);
+        ObjectNode body = MAPPER.createObjectNode();
+        body.put("ref", "refs/heads/" + newBranch);
+        body.put("sha", baseSha);
+        post(url, body);
+        log.info("Created branch {} in {}/{} from {}", newBranch, owner, repo, baseSha);
+    }
+
+    public PullRequest createPullRequest(String owner, String repo, String title, String bodyText,
+                                         String headBranch, String baseBranch) throws IOException, InterruptedException {
+        String url = "%s/repos/%s/%s/pulls".formatted(API_BASE, owner, repo);
+        ObjectNode body = MAPPER.createObjectNode();
+        body.put("title", title);
+        body.put("head", headBranch);
+        body.put("base", baseBranch);
+        body.put("body", bodyText);
+        JsonNode node = post(url, body);
+        int number = node.path("number").asInt(-1);
+        String prUrl = node.path("html_url").asText(null);
+        return new PullRequest(number, prUrl, headBranch, baseBranch);
     }
 
     // --- Tag & commit inspection ---
@@ -122,6 +157,22 @@ public class GitHubClient {
                 .header("X-GitHub-Api-Version", "2022-11-28")
                 .header("Content-Type", "application/json")
                 .PUT(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body)))
+                .build();
+
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        checkRateLimit(response);
+        checkResponse(response, url);
+        return MAPPER.readTree(response.body());
+    }
+
+    private JsonNode post(String url, ObjectNode body) throws IOException, InterruptedException {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Authorization", "Bearer " + token)
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body)))
                 .build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());

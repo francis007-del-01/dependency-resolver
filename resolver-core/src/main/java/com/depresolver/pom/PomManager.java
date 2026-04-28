@@ -10,10 +10,12 @@ import org.apache.maven.model.io.xpp3.MavenXpp3Reader;
 
 import java.io.StringReader;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.w3c.dom.Document;
@@ -25,20 +27,11 @@ public class PomManager {
     private static final String TAG_GROUP_ID = "groupId";
     private static final String TAG_ARTIFACT_ID = "artifactId";
     private static final String TAG_VERSION = "version";
-    private static final String TAG_DEPENDENCY = "dependency";
-    private static final String TAG_FETCH_LATEST = "fetchLatest";
-    private static final String TAG_FETCH_RELEASE = "fetchRelease";
 
     private static final String PROPERTY_REF_PREFIX = "${";
     private static final String PROPERTY_REF_SUFFIX = "}";
 
     public record PomCoordinates(String groupId, String artifactId, String version) {}
-
-    public record FetchDirective(String groupId, String artifactId) {
-        public String key() { return groupId + ":" + artifactId; }
-    }
-
-    public record FetchDirectives(List<FetchDirective> latest, List<FetchDirective> release) {}
 
     public record GitHubCoords(String owner, String name) {}
 
@@ -71,62 +64,74 @@ public class PomManager {
         return Optional.of(new GitHubCoords(m.group(1), m.group(2)));
     }
 
-    public FetchDirectives readFetchDirectives(String pomContent) throws Exception {
-        Document doc = SecureXmlParser.parse(pomContent);
-        List<FetchDirective> latest = readDirectiveList(doc, TAG_FETCH_LATEST);
-        List<FetchDirective> release = readDirectiveList(doc, TAG_FETCH_RELEASE);
-        return new FetchDirectives(latest, release);
-    }
+    public List<PomCoordinates> listCoordinatesForGroupIds(String pomContent, List<String> groupIds) throws Exception {
+        Model model = parse(pomContent);
+        Properties props = model.getProperties();
+        Set<String> selectedGroupIds = normalizeGroupIds(groupIds);
+        List<PomCoordinates> coordinates = new ArrayList<>();
 
-    private List<FetchDirective> readDirectiveList(Document doc, String wrapperTag) {
-        List<FetchDirective> out = new ArrayList<>();
-        NodeList wrappers = doc.getElementsByTagName(wrapperTag);
-        for (int i = 0; i < wrappers.getLength(); i++) {
-            Element wrapper = (Element) wrappers.item(i);
-            NodeList deps = wrapper.getElementsByTagName(TAG_DEPENDENCY);
-            for (int j = 0; j < deps.getLength(); j++) {
-                Element dep = (Element) deps.item(j);
-                String g = SecureXmlParser.textOfChild(dep, TAG_GROUP_ID);
-                String a = SecureXmlParser.textOfChild(dep, TAG_ARTIFACT_ID);
-                if (g != null && a != null) out.add(new FetchDirective(g.trim(), a.trim()));
+        for (Dependency dep : model.getDependencies()) {
+            addCoordinateIfTracked(dep.getGroupId(), dep.getArtifactId(), resolveVersion(dep.getVersion(), props),
+                    selectedGroupIds, coordinates);
+        }
+        if (model.getDependencyManagement() != null) {
+            for (Dependency dep : model.getDependencyManagement().getDependencies()) {
+                addCoordinateIfTracked(dep.getGroupId(), dep.getArtifactId(), resolveVersion(dep.getVersion(), props),
+                        selectedGroupIds, coordinates);
             }
         }
-        return out;
+        if (model.getBuild() != null) {
+            for (Plugin plugin : model.getBuild().getPlugins()) {
+                addCoordinateIfTracked(plugin.getGroupId(), plugin.getArtifactId(), resolveVersion(plugin.getVersion(), props),
+                        selectedGroupIds, coordinates);
+            }
+            if (model.getBuild().getPluginManagement() != null) {
+                for (Plugin plugin : model.getBuild().getPluginManagement().getPlugins()) {
+                    addCoordinateIfTracked(plugin.getGroupId(), plugin.getArtifactId(), resolveVersion(plugin.getVersion(), props),
+                            selectedGroupIds, coordinates);
+                }
+            }
+        }
+        Parent parent = model.getParent();
+        if (parent != null) {
+            addCoordinateIfTracked(parent.getGroupId(), parent.getArtifactId(), parent.getVersion(),
+                    selectedGroupIds, coordinates);
+        }
+        return coordinates;
     }
 
-    public List<BumpedDependency> findBumpsFromDirectives(String pomContent,
-                                                         Map<String, String> latestVersions,
-                                                         Map<String, String> updatedByMap) throws Exception {
+    public List<BumpedDependency> findBumpsFromLatestVersions(String pomContent,
+                                                              Map<String, String> latestVersions) throws Exception {
         Model model = parse(pomContent);
         Properties props = model.getProperties();
         List<BumpedDependency> bumps = new ArrayList<>();
 
         for (Dependency dep : model.getDependencies()) {
             checkDep(dep.getGroupId(), dep.getArtifactId(), resolveVersion(dep.getVersion(), props),
-                    latestVersions, updatedByMap, bumps);
+                    latestVersions, bumps);
         }
         if (model.getDependencyManagement() != null) {
             for (Dependency dep : model.getDependencyManagement().getDependencies()) {
                 checkDep(dep.getGroupId(), dep.getArtifactId(), resolveVersion(dep.getVersion(), props),
-                        latestVersions, updatedByMap, bumps);
+                        latestVersions, bumps);
             }
         }
         if (model.getBuild() != null) {
             for (Plugin plugin : model.getBuild().getPlugins()) {
                 checkDep(plugin.getGroupId(), plugin.getArtifactId(), resolveVersion(plugin.getVersion(), props),
-                        latestVersions, updatedByMap, bumps);
+                        latestVersions, bumps);
             }
             if (model.getBuild().getPluginManagement() != null) {
                 for (Plugin plugin : model.getBuild().getPluginManagement().getPlugins()) {
                     checkDep(plugin.getGroupId(), plugin.getArtifactId(), resolveVersion(plugin.getVersion(), props),
-                            latestVersions, updatedByMap, bumps);
+                            latestVersions, bumps);
                 }
             }
         }
         Parent parent = model.getParent();
         if (parent != null) {
             checkDep(parent.getGroupId(), parent.getArtifactId(), parent.getVersion(),
-                    latestVersions, updatedByMap, bumps);
+                    latestVersions, bumps);
         }
         return bumps;
     }
@@ -243,15 +248,32 @@ public class PomManager {
     }
 
     private void checkDep(String groupId, String artifactId, String currentVersion,
-                          Map<String, String> latestVersions, Map<String, String> updatedByMap,
+                          Map<String, String> latestVersions,
                           List<BumpedDependency> bumps) {
         if (groupId == null || artifactId == null || currentVersion == null) return;
         String key = groupId + ":" + artifactId;
         String latestVersion = latestVersions.get(key);
         if (latestVersion != null && VersionComparator.isOlderThan(currentVersion, latestVersion)) {
-            String updatedBy = updatedByMap.getOrDefault(key, "unknown");
-            bumps.add(new BumpedDependency(groupId, artifactId, currentVersion, latestVersion, updatedBy));
+            bumps.add(new BumpedDependency(groupId, artifactId, currentVersion, latestVersion));
         }
+    }
+
+    private static Set<String> normalizeGroupIds(List<String> groupIds) {
+        Set<String> out = new HashSet<>();
+        if (groupIds == null) return out;
+        for (String groupId : groupIds) {
+            if (groupId != null && !groupId.isBlank()) {
+                out.add(groupId.trim());
+            }
+        }
+        return out;
+    }
+
+    private static void addCoordinateIfTracked(String groupId, String artifactId, String currentVersion,
+                                               Set<String> selectedGroupIds, List<PomCoordinates> coordinates) {
+        if (groupId == null || artifactId == null || currentVersion == null) return;
+        if (!selectedGroupIds.contains(groupId)) return;
+        coordinates.add(new PomCoordinates(groupId, artifactId, currentVersion));
     }
 
     private String resolveVersion(String version, Properties props) {

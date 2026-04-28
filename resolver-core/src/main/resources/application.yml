@@ -7,13 +7,6 @@ artifactory:
   snapshot-repo: ${ARTIFACTORY_SNAPSHOT_REPO:}
   token: ${ARTIFACTORY_TOKEN:}
 
-resolver:
-  service-user:
-    names:
-      - root
-    emails:
-      - Tech-t4i-svc-dbill-automation@intuit.com
-
 logging:
   level:
     com.depresolver: DEBUG

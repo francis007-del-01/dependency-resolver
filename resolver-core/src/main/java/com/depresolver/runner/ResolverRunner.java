@@ -1,24 +1,23 @@
 package com.depresolver.runner;
 
 import com.depresolver.artifactory.ArtifactoryClient;
-import com.depresolver.artifactory.ArtifactoryClient.GitInfo;
-import com.depresolver.config.ServiceUserProperties;
 import com.depresolver.github.GitHubClient;
-import com.depresolver.github.GitHubClient.CommitAuthor;
 import com.depresolver.pom.BumpedDependency;
 import com.depresolver.pom.PomManager;
-import com.depresolver.pom.PomManager.FetchDirective;
-import com.depresolver.pom.PomManager.FetchDirectives;
+import com.depresolver.pom.PomManager.PomCoordinates;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Component;
 
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
+import java.util.Set;
 
 @Component
 public class ResolverRunner implements ApplicationRunner {
@@ -28,14 +27,11 @@ public class ResolverRunner implements ApplicationRunner {
     private final GitHubClient gitHubClient;
     private final ArtifactoryClient artifactoryClient;
     private final PomManager pomManager;
-    private final ServiceUserProperties serviceUserProperties;
 
-    public ResolverRunner(GitHubClient gitHubClient, ArtifactoryClient artifactoryClient,
-                          PomManager pomManager, ServiceUserProperties serviceUserProperties) {
+    public ResolverRunner(GitHubClient gitHubClient, ArtifactoryClient artifactoryClient, PomManager pomManager) {
         this.gitHubClient = gitHubClient;
         this.artifactoryClient = artifactoryClient;
         this.pomManager = pomManager;
-        this.serviceUserProperties = serviceUserProperties;
     }
 
     @Override
@@ -44,38 +40,47 @@ public class ResolverRunner implements ApplicationRunner {
         String repo = requireArg(args, "repo");
         String branch = requireArg(args, "branch");
         String pomPath = firstArg(args, "pomPath", "pom.xml");
+        List<String> releaseGroupIds = requiredMultiArg(args, "releaseGroupId");
 
-        log.info("Resolving dependencies for {}/{} on branch {} (pom: {})", owner, repo, branch, pomPath);
+        log.info("Resolving dependencies for {}/{} on branch {} (pom: {}, releaseGroupIds={})",
+                owner, repo, branch, pomPath, releaseGroupIds);
 
         GitHubClient.FileContent pomFile = gitHubClient.getFileContent(owner, repo, pomPath, branch);
         String pomContent = pomFile.content();
+        List<PomCoordinates> trackedCoordinates = pomManager.listCoordinatesForGroupIds(pomContent, releaseGroupIds);
 
-        FetchDirectives directives = pomManager.readFetchDirectives(pomContent);
-        log.info("fetchLatest: {} deps, fetchRelease: {} deps", directives.latest().size(), directives.release().size());
+        Set<String> matchedGroups = new LinkedHashSet<>();
+        for (PomCoordinates coordinate : trackedCoordinates) {
+            matchedGroups.add(coordinate.groupId());
+        }
+        for (String groupId : releaseGroupIds) {
+            if (!matchedGroups.contains(groupId)) {
+                log.warn("No dependencies found in pom for release group {}", groupId);
+            }
+        }
 
-        if (directives.latest().isEmpty() && directives.release().isEmpty()) {
-            log.info("No <fetchLatest> or <fetchRelease> directives; nothing to do");
+        if (trackedCoordinates.isEmpty()) {
+            log.info("No matching dependencies found for release group IDs {}; nothing to do", releaseGroupIds);
             return;
         }
 
         Map<String, String> latestVersions = new HashMap<>();
-        for (FetchDirective d : directives.latest()) {
-            resolveLatest(d).ifPresent(v -> {
-                latestVersions.put(d.key(), v);
-                log.info("  fetchLatest {} -> {}", d.key(), v);
-            });
-        }
-        for (FetchDirective d : directives.release()) {
-            Optional<String> v = artifactoryClient.latestReleaseVersion(d.groupId(), d.artifactId());
-            if (v.isPresent()) {
-                latestVersions.put(d.key(), v.get());
-                log.info("  fetchRelease {} -> {}", d.key(), v.get());
+        Set<String> resolvedCoordinates = new LinkedHashSet<>();
+        for (PomCoordinates coordinate : trackedCoordinates) {
+            String key = coordinate.groupId() + ":" + coordinate.artifactId();
+            if (!resolvedCoordinates.add(key)) {
+                continue;
+            }
+            var latest = artifactoryClient.latestReleaseVersion(coordinate.groupId(), coordinate.artifactId());
+            if (latest.isPresent()) {
+                latestVersions.put(key, latest.get());
+                log.info("  release {} -> {}", key, latest.get());
             } else {
-                log.warn("  fetchRelease {} -> no release found in Artifactory", d.key());
+                log.warn("  release {} -> no release found in Artifactory", key);
             }
         }
 
-        List<BumpedDependency> bumps = pomManager.findBumpsFromDirectives(pomContent, latestVersions, new HashMap<>());
+        List<BumpedDependency> bumps = pomManager.findBumpsFromLatestVersions(pomContent, latestVersions);
 
         if (bumps.isEmpty()) {
             log.info("{}/{} ({}) is already up to date", owner, repo, branch);
@@ -93,99 +98,14 @@ public class ResolverRunner implements ApplicationRunner {
             return;
         }
 
-        String message = buildCommitMessage(bumps);
-        gitHubClient.updateFile(owner, repo, pomPath, updated, pomFile.sha(), branch, message);
-        log.info("Committed {} update(s) to {}/{} on {}", bumps.size(), owner, repo, branch);
-    }
-
-    private Optional<String> resolveLatest(FetchDirective d) throws Exception {
-        String g = d.groupId();
-        String a = d.artifactId();
-
-        Optional<String> releaseVersion = artifactoryClient.latestReleaseVersion(g, a);
-        Optional<String> snapshotVersion = artifactoryClient.latestSnapshotBaseVersion(g, a);
-
-        if (snapshotVersion.isEmpty() && releaseVersion.isEmpty()) {
-            log.warn("  fetchLatest {} -> no release or SNAPSHOT in Artifactory", d.key());
-            return Optional.empty();
-        }
-        if (snapshotVersion.isEmpty()) {
-            log.info("  fetchLatest {} -> no SNAPSHOT; using release", d.key());
-            return releaseVersion;
-        }
-        if (releaseVersion.isEmpty()) {
-            log.info("  fetchLatest {} -> no release yet; using SNAPSHOT", d.key());
-            return snapshotVersion;
-        }
-
-        Optional<GitInfo> snapInfo;
-        Optional<GitInfo> relInfo;
-        try {
-            snapInfo = artifactoryClient.getSnapshotGitInfo(g, a, snapshotVersion.get());
-            relInfo = artifactoryClient.getReleaseGitInfo(g, a, releaseVersion.get());
-        } catch (Exception e) {
-            log.warn("  fetchLatest {} -> git info fetch failed ({}); preferring SNAPSHOT",
-                    d.key(), e.getMessage());
-            return snapshotVersion;
-        }
-
-        if (snapInfo.isEmpty() || relInfo.isEmpty()) {
-            log.warn("  fetchLatest {} -> git.properties missing (snapshot={} release={}); preferring SNAPSHOT",
-                    d.key(), snapInfo.isPresent(), relInfo.isPresent());
-            return snapshotVersion;
-        }
-
-        if (snapInfo.get().dirty() || relInfo.get().dirty()) {
-            log.warn("  fetchLatest {} -> dirty build detected (snapshotDirty={} releaseDirty={}); preferring SNAPSHOT",
-                    d.key(), snapInfo.get().dirty(), relInfo.get().dirty());
-            return snapshotVersion;
-        }
-
-        String snapSha = snapInfo.get().commitSha();
-        String relSha = relInfo.get().commitSha();
-        if (snapSha.equals(relSha)) {
-            log.info("  fetchLatest {} -> SNAPSHOT and release built from same sha ({}); using release",
-                    d.key(), abbrev(snapSha));
-            return releaseVersion;
-        }
-
-        Optional<PomManager.GitHubCoords> scmOpt;
-        try {
-            scmOpt = artifactoryClient.getReleaseScm(g, a, releaseVersion.get());
-        } catch (Exception e) {
-            log.warn("  fetchLatest {} -> SCM fetch failed ({}); preferring SNAPSHOT",
-                    d.key(), e.getMessage());
-            return snapshotVersion;
-        }
-        if (scmOpt.isEmpty()) {
-            log.warn("  fetchLatest {} -> no <scm> in library pom; can't filter bot commits, preferring SNAPSHOT",
-                    d.key());
-            return snapshotVersion;
-        }
-        PomManager.GitHubCoords scm = scmOpt.get();
-
-        List<CommitAuthor> commits;
-        try {
-            commits = gitHubClient.compareCommits(scm.owner(), scm.name(), relSha, snapSha);
-        } catch (Exception e) {
-            log.warn("  fetchLatest {} -> GitHub compare {}/{} {}..{} failed ({}); preferring SNAPSHOT",
-                    d.key(), scm.owner(), scm.name(), abbrev(relSha), abbrev(snapSha), e.getMessage());
-            return snapshotVersion;
-        }
-
-        int human = 0;
-        for (CommitAuthor ca : commits) {
-            if (!serviceUserProperties.isServiceUser(ca.name(), ca.email())) human++;
-        }
-
-        if (human == 0) {
-            log.info("  fetchLatest {} -> {} bot-only commits between release {} and snapshot {}; using release",
-                    d.key(), commits.size(), abbrev(relSha), abbrev(snapSha));
-            return releaseVersion;
-        }
-        log.info("  fetchLatest {} -> {} human commit(s) between release {} and snapshot {}; using SNAPSHOT",
-                d.key(), human, abbrev(relSha), abbrev(snapSha));
-        return snapshotVersion;
+        String commitMessage = buildCommitMessage(bumps);
+        String runBranch = buildRunBranchName(branch);
+        String baseSha = gitHubClient.getBranchHeadSha(owner, repo, branch);
+        gitHubClient.createBranch(owner, repo, runBranch, baseSha);
+        gitHubClient.updateFile(owner, repo, pomPath, updated, pomFile.sha(), runBranch, commitMessage);
+        GitHubClient.PullRequest pr = gitHubClient.createPullRequest(
+                owner, repo, buildPrTitle(bumps), buildPrBody(bumps, releaseGroupIds), runBranch, branch);
+        log.info("Created PR #{} for {}/{}: {}", pr.number(), owner, repo, pr.url());
     }
 
     private static String buildCommitMessage(List<BumpedDependency> bumps) {
@@ -202,9 +122,35 @@ public class ResolverRunner implements ApplicationRunner {
         return sb.toString().trim();
     }
 
-    private static String abbrev(String sha) {
-        if (sha == null) return "?";
-        return sha.length() >= 7 ? sha.substring(0, 7) : sha;
+    private static String buildPrTitle(List<BumpedDependency> bumps) {
+        if (bumps.size() == 1) {
+            BumpedDependency b = bumps.get(0);
+            return "chore(deps): bump %s:%s to %s".formatted(b.groupId(), b.artifactId(), b.newVersion());
+        }
+        return "chore(deps): bump %s dependencies".formatted(bumps.size());
+    }
+
+    private static String buildPrBody(List<BumpedDependency> bumps, List<String> releaseGroupIds) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Automated release dependency update.\n\n");
+        sb.append("Release groups:\n");
+        for (String groupId : releaseGroupIds) {
+            sb.append("- ").append(groupId).append('\n');
+        }
+        sb.append("\nUpdated dependencies:\n");
+        for (BumpedDependency b : bumps) {
+            sb.append("- ").append(b.groupId()).append(':').append(b.artifactId())
+                    .append(' ').append(b.oldVersion()).append(" -> ").append(b.newVersion()).append('\n');
+        }
+        return sb.toString().trim();
+    }
+
+    private static String buildRunBranchName(String baseBranch) {
+        return "resolver/release-" + sanitizeBranchComponent(baseBranch) + "-" + Instant.now().toEpochMilli();
+    }
+
+    private static String sanitizeBranchComponent(String value) {
+        return value.replaceAll("[^a-zA-Z0-9._-]", "-");
     }
 
     private static String requireArg(ApplicationArguments args, String name) {
@@ -221,5 +167,24 @@ public class ResolverRunner implements ApplicationRunner {
             return defaultValue;
         }
         return values.get(0);
+    }
+
+    private static List<String> requiredMultiArg(ApplicationArguments args, String name) {
+        List<String> values = args.getOptionValues(name);
+        if (values == null || values.isEmpty()) {
+            throw new IllegalArgumentException("Missing required --" + name + " argument");
+        }
+        Set<String> deduped = new LinkedHashSet<>();
+        for (String raw : values) {
+            if (raw == null || raw.isBlank()) continue;
+            for (String token : raw.split(",")) {
+                String trimmed = token.trim();
+                if (!trimmed.isEmpty()) deduped.add(trimmed);
+            }
+        }
+        if (deduped.isEmpty()) {
+            throw new IllegalArgumentException("Missing required --" + name + " argument");
+        }
+        return new ArrayList<>(deduped);
     }
 }
