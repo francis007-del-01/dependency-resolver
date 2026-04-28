@@ -83,24 +83,27 @@ pipeline {
                 ]) {
                     sh '''
                         set -euo pipefail
-                        release_args=()
-                        IFS=',' read -ra groups <<< "${RELEASE_GROUP_IDS}"
-                        for group in "${groups[@]}"; do
-                            trimmed="$(echo "${group}" | xargs)"
-                            if [ -n "${trimmed}" ]; then
-                                release_args+=(--releaseGroupId="${trimmed}")
-                            fi
-                        done
-                        if [ ${#release_args[@]} -eq 0 ]; then
-                            echo "No valid groupIds parsed from RELEASE_GROUP_IDS=${RELEASE_GROUP_IDS}"
-                            exit 1
-                        fi
-                        java -jar "${RESOLVER_JAR}" \
+                        set -- java -jar "${RESOLVER_JAR}" \
                             --owner="${OWNER}" \
                             --repo="${REPO}" \
                             --branch="${BRANCH}" \
-                            --pomPath="${POM_PATH}" \
-                            "${release_args[@]}"
+                            --pomPath="${POM_PATH}"
+                        release_group_count=0
+                        old_ifs="$IFS"
+                        IFS=','
+                        for group in ${RELEASE_GROUP_IDS}; do
+                            trimmed="$(printf '%s' "${group}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+                            if [ -n "${trimmed}" ]; then
+                                set -- "$@" "--releaseGroupId=${trimmed}"
+                                release_group_count=$((release_group_count + 1))
+                            fi
+                        done
+                        IFS="$old_ifs"
+                        if [ "${release_group_count}" -eq 0 ]; then
+                            echo "No valid groupIds parsed from RELEASE_GROUP_IDS=${RELEASE_GROUP_IDS}"
+                            exit 1
+                        fi
+                        "$@"
                     '''
                 }
             }
