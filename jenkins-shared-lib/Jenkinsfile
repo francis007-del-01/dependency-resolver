@@ -15,6 +15,7 @@ pipeline {
         string(name: 'BRANCH',          description: 'Base branch on the consumer repo for PR creation',                   defaultValue: 'main')
         string(name: 'POM_PATH',        description: 'Path to pom.xml within the consumer repo',                           defaultValue: 'pom.xml')
         string(name: 'RELEASE_GROUP_IDS', description: 'Comma-separated groupIds to resolve as latest release versions',   defaultValue: 'com.intuit.payment.common,com.intuit.payment')
+        string(name: 'RELEASE_ARTIFACTS', description: 'Optional comma-separated artifact selectors (groupId:artifactId)', defaultValue: '')
         string(name: 'RESOLVER_REPO',   description: 'GitHub repo hosting the resolver source (owner/name)',                defaultValue: 'francis007-del-01/dependency-resolver')
         string(name: 'RESOLVER_REF',    description: 'Branch/tag/commit of the resolver source to build',                   defaultValue: 'main')
     }
@@ -38,11 +39,15 @@ pipeline {
         stage('Validate Inputs') {
             steps {
                 script {
-                    if (!params.OWNER?.trim() || !params.REPO?.trim() || !params.BRANCH?.trim() || !params.RELEASE_GROUP_IDS?.trim()) {
-                        error "OWNER, REPO, BRANCH, and RELEASE_GROUP_IDS parameters are all required."
+                    if (!params.OWNER?.trim() || !params.REPO?.trim() || !params.BRANCH?.trim()) {
+                        error "OWNER, REPO, and BRANCH parameters are required."
+                    }
+                    if (!params.RELEASE_GROUP_IDS?.trim() && !params.RELEASE_ARTIFACTS?.trim()) {
+                        error "At least one of RELEASE_GROUP_IDS or RELEASE_ARTIFACTS must be provided."
                     }
                     echo "Resolving dependencies for ${params.OWNER}/${params.REPO}@${params.BRANCH} (pom=${params.POM_PATH})"
                     echo "Release groups: ${params.RELEASE_GROUP_IDS}"
+                    echo "Release artifacts: ${params.RELEASE_ARTIFACTS}"
                     echo "Using resolver source: ${params.RESOLVER_REPO} @ ${params.RESOLVER_REF}"
                 }
             }
@@ -89,6 +94,7 @@ pipeline {
                             --branch="${BRANCH}" \
                             --pomPath="${POM_PATH}"
                         release_group_count=0
+                        release_artifact_count=0
                         old_ifs="$IFS"
                         IFS=','
                         for group in ${RELEASE_GROUP_IDS}; do
@@ -98,9 +104,16 @@ pipeline {
                                 release_group_count=$((release_group_count + 1))
                             fi
                         done
+                        for artifact in ${RELEASE_ARTIFACTS}; do
+                            trimmed="$(printf '%s' "${artifact}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+                            if [ -n "${trimmed}" ]; then
+                                set -- "$@" "--releaseArtifact=${trimmed}"
+                                release_artifact_count=$((release_artifact_count + 1))
+                            fi
+                        done
                         IFS="$old_ifs"
-                        if [ "${release_group_count}" -eq 0 ]; then
-                            echo "No valid groupIds parsed from RELEASE_GROUP_IDS=${RELEASE_GROUP_IDS}"
+                        if [ "${release_group_count}" -eq 0 ] && [ "${release_artifact_count}" -eq 0 ]; then
+                            echo "No valid selectors parsed from RELEASE_GROUP_IDS=${RELEASE_GROUP_IDS} RELEASE_ARTIFACTS=${RELEASE_ARTIFACTS}"
                             exit 1
                         fi
                         "$@"

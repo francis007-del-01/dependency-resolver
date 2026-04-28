@@ -31,7 +31,11 @@ public class PomManager {
     private static final String PROPERTY_REF_PREFIX = "${";
     private static final String PROPERTY_REF_SUFFIX = "}";
 
-    public record PomCoordinates(String groupId, String artifactId, String version) {}
+    public record PomCoordinates(String groupId, String artifactId, String version) {
+        public String key() {
+            return groupId + ":" + artifactId;
+        }
+    }
 
     public record GitHubCoords(String owner, String name) {}
 
@@ -64,38 +68,41 @@ public class PomManager {
         return Optional.of(new GitHubCoords(m.group(1), m.group(2)));
     }
 
-    public List<PomCoordinates> listCoordinatesForGroupIds(String pomContent, List<String> groupIds) throws Exception {
+    public List<PomCoordinates> listCoordinatesForTargets(String pomContent,
+                                                          List<String> groupIds,
+                                                          Set<String> artifactKeys) throws Exception {
         Model model = parse(pomContent);
         Properties props = model.getProperties();
         Set<String> selectedGroupIds = normalizeGroupIds(groupIds);
+        Set<String> selectedArtifactKeys = normalizeArtifactKeys(artifactKeys);
         List<PomCoordinates> coordinates = new ArrayList<>();
 
         for (Dependency dep : model.getDependencies()) {
             addCoordinateIfTracked(dep.getGroupId(), dep.getArtifactId(), resolveVersion(dep.getVersion(), props),
-                    selectedGroupIds, coordinates);
+                    selectedGroupIds, selectedArtifactKeys, coordinates);
         }
         if (model.getDependencyManagement() != null) {
             for (Dependency dep : model.getDependencyManagement().getDependencies()) {
                 addCoordinateIfTracked(dep.getGroupId(), dep.getArtifactId(), resolveVersion(dep.getVersion(), props),
-                        selectedGroupIds, coordinates);
+                        selectedGroupIds, selectedArtifactKeys, coordinates);
             }
         }
         if (model.getBuild() != null) {
             for (Plugin plugin : model.getBuild().getPlugins()) {
                 addCoordinateIfTracked(plugin.getGroupId(), plugin.getArtifactId(), resolveVersion(plugin.getVersion(), props),
-                        selectedGroupIds, coordinates);
+                        selectedGroupIds, selectedArtifactKeys, coordinates);
             }
             if (model.getBuild().getPluginManagement() != null) {
                 for (Plugin plugin : model.getBuild().getPluginManagement().getPlugins()) {
                     addCoordinateIfTracked(plugin.getGroupId(), plugin.getArtifactId(), resolveVersion(plugin.getVersion(), props),
-                            selectedGroupIds, coordinates);
+                            selectedGroupIds, selectedArtifactKeys, coordinates);
                 }
             }
         }
         Parent parent = model.getParent();
         if (parent != null) {
             addCoordinateIfTracked(parent.getGroupId(), parent.getArtifactId(), parent.getVersion(),
-                    selectedGroupIds, coordinates);
+                    selectedGroupIds, selectedArtifactKeys, coordinates);
         }
         return coordinates;
     }
@@ -269,10 +276,28 @@ public class PomManager {
         return out;
     }
 
+    private static Set<String> normalizeArtifactKeys(Set<String> artifactKeys) {
+        Set<String> out = new HashSet<>();
+        if (artifactKeys == null) return out;
+        for (String artifactKey : artifactKeys) {
+            if (artifactKey != null && !artifactKey.isBlank()) {
+                out.add(artifactKey.trim());
+            }
+        }
+        return out;
+    }
+
     private static void addCoordinateIfTracked(String groupId, String artifactId, String currentVersion,
-                                               Set<String> selectedGroupIds, List<PomCoordinates> coordinates) {
+                                               Set<String> selectedGroupIds, Set<String> selectedArtifactKeys,
+                                               List<PomCoordinates> coordinates) {
         if (groupId == null || artifactId == null || currentVersion == null) return;
-        if (!selectedGroupIds.contains(groupId)) return;
+        String key = groupId + ":" + artifactId;
+        boolean hasGroupSelector = !selectedGroupIds.isEmpty();
+        boolean hasArtifactSelector = !selectedArtifactKeys.isEmpty();
+        if (!hasGroupSelector && !hasArtifactSelector) return;
+        boolean matchesGroup = selectedGroupIds.contains(groupId);
+        boolean matchesArtifact = selectedArtifactKeys.contains(key);
+        if (!matchesGroup && !matchesArtifact) return;
         coordinates.add(new PomCoordinates(groupId, artifactId, currentVersion));
     }
 

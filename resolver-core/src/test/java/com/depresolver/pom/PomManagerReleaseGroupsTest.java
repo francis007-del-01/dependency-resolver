@@ -13,7 +13,7 @@ class PomManagerReleaseGroupsTest {
     private final PomManager mgr = new PomManager();
 
     @Test
-    void listCoordinatesForGroupIdsScansAllSections() throws Exception {
+    void listCoordinatesForTargetsScansAllSections() throws Exception {
         String pom = """
                 <project xmlns="http://maven.apache.org/POM/4.0.0">
                   <modelVersion>4.0.0</modelVersion>
@@ -49,9 +49,10 @@ class PomManagerReleaseGroupsTest {
                 </project>
                 """;
 
-        List<PomManager.PomCoordinates> coordinates = mgr.listCoordinatesForGroupIds(
+        List<PomManager.PomCoordinates> coordinates = mgr.listCoordinatesForTargets(
                 pom,
-                List.of("com.acme.libs", "com.acme.plugins", "com.acme.parent"));
+                List.of("com.acme.libs", "com.acme.plugins", "com.acme.parent"),
+                java.util.Set.of());
 
         assertEquals(5, coordinates.size());
         assertTrue(coordinates.contains(new PomManager.PomCoordinates("com.acme.libs", "core", "1.2.0")));
@@ -72,8 +73,27 @@ class PomManagerReleaseGroupsTest {
                   </dependencies>
                 </project>
                 """;
-        List<PomManager.PomCoordinates> coordinates = mgr.listCoordinatesForGroupIds(pom, List.of("org.missing"));
+        List<PomManager.PomCoordinates> coordinates = mgr.listCoordinatesForTargets(
+                pom, List.of("org.missing"), java.util.Set.of());
         assertTrue(coordinates.isEmpty());
+    }
+
+    @Test
+    void listCoordinatesForTargetsMatchesSpecificArtifact() throws Exception {
+        String pom = """
+                <project xmlns="http://maven.apache.org/POM/4.0.0">
+                  <modelVersion>4.0.0</modelVersion>
+                  <groupId>com.acme</groupId><artifactId>service</artifactId><version>1.0.0</version>
+                  <dependencies>
+                    <dependency><groupId>com.intuit</groupId><artifactId>pymt-lib</artifactId><version>1.0.0</version></dependency>
+                    <dependency><groupId>com.intuit</groupId><artifactId>pymt-schema</artifactId><version>1.0.0</version></dependency>
+                  </dependencies>
+                </project>
+                """;
+        List<PomManager.PomCoordinates> coordinates = mgr.listCoordinatesForTargets(
+                pom, List.of(), java.util.Set.of("com.intuit:pymt-lib"));
+        assertEquals(1, coordinates.size());
+        assertEquals(new PomManager.PomCoordinates("com.intuit", "pymt-lib", "1.0.0"), coordinates.get(0));
     }
 
     @Test

@@ -12,7 +12,7 @@ A per-repo CLI tool that updates Maven dependency versions on a target repositor
 
 Dependency selection is runtime-driven. The resolver no longer reads custom directive blocks from the pom.
 
-- You pass one or more `--releaseGroupId` arguments.
+- You pass one or more `--releaseGroupId` and/or `--releaseArtifact` arguments.
 - The resolver scans the target pom and tracks all matching entries across:
   - dependencies
   - dependencyManagement
@@ -32,7 +32,8 @@ Dependency selection is runtime-driven. The resolver no longer reads custom dire
 | `--owner` | yes | — | GitHub owner/org of target repo |
 | `--repo` | yes | — | GitHub repo name of target repo |
 | `--branch` | yes | — | Base branch for PR |
-| `--releaseGroupId` | yes (repeatable) | — | One or more groupIds to track |
+| `--releaseGroupId` | optional (repeatable) | — | GroupIds to track |
+| `--releaseArtifact` | optional (repeatable) | — | Exact selectors (`groupId:artifactId` or `groupId::artifactId`) |
 | `--pomPath` | no | `pom.xml` | Target pom path in repo |
 
 Examples:
@@ -52,9 +53,19 @@ Comma-separated input is also accepted:
 --releaseGroupId=com.acme.billing,com.acme.plugins
 ```
 
+Artifact-specific only:
+
+```bash
+java -jar resolver-core/target/resolver-core-1.0.0-SNAPSHOT.jar \
+  --owner=myorg \
+  --repo=my-service \
+  --branch=main \
+  --releaseArtifact=com.intuit:pymt-lib
+```
+
 ## What Gets Updated
 
-For matching groupIds, resolver checks version-bearing entries and updates only when current version is older:
+For matching selectors, resolver checks version-bearing entries and updates only when current version is older:
 
 - direct dependency versions
 - dependencyManagement versions
@@ -63,7 +74,8 @@ For matching groupIds, resolver checks version-bearing entries and updates only 
 - parent version
 - backing property values when versions are property references
 
-If a provided groupId has no matches in pom, resolver logs a warning and continues.
+If a provided groupId/artifact selector has no matches in pom, resolver logs a warning and continues.
+If an artifact selector belongs to a group already present in `--releaseGroupId`, that artifact selector is ignored as redundant.
 
 ## Writeback Behavior
 
@@ -96,6 +108,8 @@ mvn -pl resolver-core clean package
 Set:
 
 - `OWNER`, `REPO`, `BRANCH`, optional `POM_PATH`
-- `RELEASE_GROUP_IDS` (comma-separated groupIds)
+- At least one of:
+  - `RELEASE_GROUP_IDS` (comma-separated groupIds)
+  - `RELEASE_ARTIFACTS` (comma-separated `groupId:artifactId`)
 
-The pipeline converts `RELEASE_GROUP_IDS` into repeatable `--releaseGroupId` args.
+The pipeline converts these params into repeatable `--releaseGroupId` / `--releaseArtifact` args.

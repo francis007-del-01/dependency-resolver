@@ -23,6 +23,13 @@ import java.util.Set;
 public class ResolverRunner implements ApplicationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(ResolverRunner.class);
+    private static final String ARG_OWNER = "owner";
+    private static final String ARG_REPO = "repo";
+    private static final String ARG_BRANCH = "branch";
+    private static final String ARG_POM_PATH = "pomPath";
+    private static final String ARG_RELEASE_GROUP_ID = "releaseGroupId";
+    private static final String ARG_RELEASE_ARTIFACT = "releaseArtifact";
+    private static final String DEFAULT_POM_PATH = "pom.xml";
 
     private final GitHubClient gitHubClient;
     private final ArtifactoryClient artifactoryClient;
@@ -36,18 +43,26 @@ public class ResolverRunner implements ApplicationRunner {
 
     @Override
     public void run(ApplicationArguments args) throws Exception {
-        String owner = requireArg(args, "owner");
-        String repo = requireArg(args, "repo");
-        String branch = requireArg(args, "branch");
-        String pomPath = firstArg(args, "pomPath", "pom.xml");
-        List<String> releaseGroupIds = requiredMultiArg(args, "releaseGroupId");
+        String owner = requireArg(args, ARG_OWNER);
+        String repo = requireArg(args, ARG_REPO);
+        String branch = requireArg(args, ARG_BRANCH);
+        String pomPath = firstArg(args, ARG_POM_PATH, DEFAULT_POM_PATH);
+        List<String> releaseGroupIds = optionalMultiArg(args, ARG_RELEASE_GROUP_ID);
+        List<String> releaseArtifacts = optionalMultiArg(args, ARG_RELEASE_ARTIFACT);
+        if (releaseGroupIds.isEmpty() && releaseArtifacts.isEmpty()) {
+            throw new IllegalArgumentException("At least one of --" + ARG_RELEASE_GROUP_ID
+                    + " or --" + ARG_RELEASE_ARTIFACT + " is required");
+        }
+        Set<String> releaseArtifactKeys = filterArtifactKeysOverlappingGroups(
+                parseReleaseArtifactKeys(releaseArtifacts), releaseGroupIds);
 
-        log.info("Resolving dependencies for {}/{} on branch {} (pom: {}, releaseGroupIds={})",
-                owner, repo, branch, pomPath, releaseGroupIds);
+        log.info("Resolving dependencies for {}/{} on branch {} (pom: {}, releaseGroupIds={}, releaseArtifacts={})",
+                owner, repo, branch, pomPath, releaseGroupIds, releaseArtifactKeys);
 
         GitHubClient.FileContent pomFile = gitHubClient.getFileContent(owner, repo, pomPath, branch);
         String pomContent = pomFile.content();
-        List<PomCoordinates> trackedCoordinates = pomManager.listCoordinatesForGroupIds(pomContent, releaseGroupIds);
+        List<PomCoordinates> trackedCoordinates = pomManager.listCoordinatesForTargets(
+                pomContent, releaseGroupIds, releaseArtifactKeys);
 
         Set<String> matchedGroups = new LinkedHashSet<>();
         for (PomCoordinates coordinate : trackedCoordinates) {
@@ -58,9 +73,19 @@ public class ResolverRunner implements ApplicationRunner {
                 log.warn("No dependencies found in pom for release group {}", groupId);
             }
         }
+        Set<String> matchedArtifacts = new LinkedHashSet<>();
+        for (PomCoordinates coordinate : trackedCoordinates) {
+            matchedArtifacts.add(coordinate.key());
+        }
+        for (String artifactKey : releaseArtifactKeys) {
+            if (!matchedArtifacts.contains(artifactKey)) {
+                log.warn("No dependency found in pom for release artifact {}", artifactKey);
+            }
+        }
 
         if (trackedCoordinates.isEmpty()) {
-            log.info("No matching dependencies found for release group IDs {}; nothing to do", releaseGroupIds);
+            log.info("No matching dependencies found for release selectors (groups={}, artifacts={}); nothing to do",
+                    releaseGroupIds, releaseArtifactKeys);
             return;
         }
 
@@ -104,7 +129,7 @@ public class ResolverRunner implements ApplicationRunner {
         gitHubClient.createBranch(owner, repo, runBranch, baseSha);
         gitHubClient.updateFile(owner, repo, pomPath, updated, pomFile.sha(), runBranch, commitMessage);
         GitHubClient.PullRequest pr = gitHubClient.createPullRequest(
-                owner, repo, buildPrTitle(bumps), buildPrBody(bumps, releaseGroupIds), runBranch, branch);
+                owner, repo, buildPrTitle(bumps), buildPrBody(bumps, releaseGroupIds, releaseArtifactKeys), runBranch, branch);
         log.info("Created PR #{} for {}/{}: {}", pr.number(), owner, repo, pr.url());
     }
 
@@ -130,14 +155,25 @@ public class ResolverRunner implements ApplicationRunner {
         return "chore(deps): bump %s dependencies".formatted(bumps.size());
     }
 
-    private static String buildPrBody(List<BumpedDependency> bumps, List<String> releaseGroupIds) {
+    private static String buildPrBody(List<BumpedDependency> bumps, List<String> releaseGroupIds,
+                                      Set<String> releaseArtifactKeys) {
         StringBuilder sb = new StringBuilder();
         sb.append("Automated release dependency update.\n\n");
-        sb.append("Release groups:\n");
-        for (String groupId : releaseGroupIds) {
-            sb.append("- ").append(groupId).append('\n');
+        if (!releaseGroupIds.isEmpty()) {
+            sb.append("Release groups:\n");
+            for (String groupId : releaseGroupIds) {
+                sb.append("- ").append(groupId).append('\n');
+            }
+            sb.append('\n');
         }
-        sb.append("\nUpdated dependencies:\n");
+        if (!releaseArtifactKeys.isEmpty()) {
+            sb.append("Release artifacts:\n");
+            for (String artifactKey : releaseArtifactKeys) {
+                sb.append("- ").append(artifactKey).append('\n');
+            }
+            sb.append('\n');
+        }
+        sb.append("Updated dependencies:\n");
         for (BumpedDependency b : bumps) {
             sb.append("- ").append(b.groupId()).append(':').append(b.artifactId())
                     .append(' ').append(b.oldVersion()).append(" -> ").append(b.newVersion()).append('\n');
@@ -169,11 +205,9 @@ public class ResolverRunner implements ApplicationRunner {
         return values.get(0);
     }
 
-    private static List<String> requiredMultiArg(ApplicationArguments args, String name) {
+    private static List<String> optionalMultiArg(ApplicationArguments args, String name) {
         List<String> values = args.getOptionValues(name);
-        if (values == null || values.isEmpty()) {
-            throw new IllegalArgumentException("Missing required --" + name + " argument");
-        }
+        if (values == null || values.isEmpty()) return List.of();
         Set<String> deduped = new LinkedHashSet<>();
         for (String raw : values) {
             if (raw == null || raw.isBlank()) continue;
@@ -182,9 +216,43 @@ public class ResolverRunner implements ApplicationRunner {
                 if (!trimmed.isEmpty()) deduped.add(trimmed);
             }
         }
-        if (deduped.isEmpty()) {
-            throw new IllegalArgumentException("Missing required --" + name + " argument");
-        }
         return new ArrayList<>(deduped);
+    }
+
+    private static Set<String> parseReleaseArtifactKeys(List<String> releaseArtifacts) {
+        Set<String> out = new LinkedHashSet<>();
+        for (String selector : releaseArtifacts) {
+            String normalized = selector;
+            if (normalized.contains("::")) {
+                normalized = normalized.replace("::", ":");
+            }
+            String[] parts = normalized.split(":", -1);
+            if (parts.length != 2 || parts[0].isBlank() || parts[1].isBlank()) {
+                throw new IllegalArgumentException(
+                        "Invalid --" + ARG_RELEASE_ARTIFACT + " value '%s'. Expected groupId:artifactId".formatted(selector));
+            }
+            out.add(parts[0].trim() + ":" + parts[1].trim());
+        }
+        return out;
+    }
+
+    private static Set<String> filterArtifactKeysOverlappingGroups(Set<String> artifactKeys, List<String> releaseGroupIds) {
+        if (artifactKeys.isEmpty() || releaseGroupIds.isEmpty()) {
+            return artifactKeys;
+        }
+        Set<String> groups = new LinkedHashSet<>(releaseGroupIds);
+        Set<String> filtered = new LinkedHashSet<>();
+        for (String artifactKey : artifactKeys) {
+            int sep = artifactKey.indexOf(':');
+            if (sep <= 0) {
+                filtered.add(artifactKey);
+                continue;
+            }
+            String groupId = artifactKey.substring(0, sep);
+            if (!groups.contains(groupId)) {
+                filtered.add(artifactKey);
+            }
+        }
+        return filtered;
     }
 }
